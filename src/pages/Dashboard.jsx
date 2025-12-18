@@ -1,4 +1,4 @@
-import { loadDb } from "../services/fakeDb";
+import { loadDb } from "../services/fakeDb.js";
 
 export default function Dashboard() {
   const db = loadDb();

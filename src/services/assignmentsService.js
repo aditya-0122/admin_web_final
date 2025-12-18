@@ -1,4 +1,4 @@
-import { loadDb, saveDb, uid } from "./fakeDb";
+import { loadDb, saveDb, uid } from "./fakeDb.js";
 
 export function listAssignments() {
   const db = loadDb();

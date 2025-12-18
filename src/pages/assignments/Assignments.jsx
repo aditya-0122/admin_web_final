@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { loadDb } from "../../services/fakeDb";
+import { loadDb } from "../../services/fakeDb.js";
 import {
   createAssignment,
   deleteAssignment,
