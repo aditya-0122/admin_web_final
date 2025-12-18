@@ -9,7 +9,7 @@ export default function AdminLayout() {
         display: "flex",
         minHeight: "100vh",
         fontFamily: "system-ui",
-        background: "#eaf2ff", // background global nyambung biru
+        background: "#eaf2ff", 
       }}
     >
       <Sidebar />
@@ -17,7 +17,7 @@ export default function AdminLayout() {
       <div
         style={{
           flex: 1,
-          background: "#eff6ff", // biru sangat muda (match sidebar)
+          background: "#eff6ff", 
         }}
       >
         <Topbar />
