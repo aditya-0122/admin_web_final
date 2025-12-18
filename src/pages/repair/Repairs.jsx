@@ -217,7 +217,7 @@ const inp = () => ({
 });
 
 const btn = () => ({ 
-  padding: "8px 14px", 
+  paddingitg: "8px 14px", 
   borderRadius: "10px", 
   border: "1px solid #bae6fd", 
   background: "#f0f9ff", 
