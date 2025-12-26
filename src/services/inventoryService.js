@@ -1,106 +1,109 @@
-import { loadDb, saveDb, uid } from "./fakeDb";
+import { api } from "./api";
 
-export function listParts(search = "") {
-  const db = loadDb();
-  const q = search.trim().toLowerCase();
-  return db.parts.filter(p =>
-    !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)
-  );
+/* =====================
+   Helpers
+===================== */
+function unwrapList(resData) {
+  if (Array.isArray(resData)) return resData;
+  if (Array.isArray(resData?.data)) return resData.data;
+  if (Array.isArray(resData?.data?.data)) return resData.data.data;
+  return [];
+}
+function unwrapItem(resData) {
+  return resData?.data ?? resData;
 }
 
-export function createPart({ name, sku, stock, minStock, buyPrice }) {
-  const db = loadDb();
-  const cleanSku = sku.trim().toUpperCase();
-  if (!name.trim()) throw new Error("Nama sparepart wajib diisi.");
-  if (!cleanSku) throw new Error("SKU wajib diisi.");
+/* =====================
+   PARTS
+===================== */
+export async function listParts(search = "") {
+  const params = {};
+  if (search) params.search = search;
 
-  const exists = db.parts.some(p => p.sku.toUpperCase() === cleanSku);
-  if (exists) throw new Error("SKU sudah ada. Harus unik.");
+  const { data } = await api.get("/admin/parts", { params });
+  return unwrapList(data);
+}
 
-  const part = {
-    id: uid("p"),
-    name: name.trim(),
-    sku: cleanSku,
-    stock: Number(stock || 0),
-    minStock: Number(minStock || 0),
-    buyPrice: Number(buyPrice || 0),
+export async function createPart(payload) {
+  const body = {
+    name: payload.name,
+    sku: payload.sku,
+    stock: Number(payload.stock ?? 0),
+    min_stock: Number(payload.minStock ?? payload.min_stock ?? 0),
+    buy_price: Number(payload.buyPrice ?? payload.buy_price ?? 0),
+  };
+  const { data } = await api.post("/admin/parts", body);
+  return unwrapItem(data);
+}
+
+export async function updatePart(id, payload) {
+  const body = {
+    name: payload.name,
+    sku: payload.sku,
+    min_stock: Number(payload.minStock ?? payload.min_stock ?? 0),
+    buy_price: Number(payload.buyPrice ?? payload.buy_price ?? 0),
+  };
+  const { data } = await api.put(`/admin/parts/${id}`, body);
+  return unwrapItem(data);
+}
+
+export async function deletePart(id) {
+  const { data } = await api.delete(`/admin/parts/${id}`);
+  return unwrapItem(data);
+}
+
+/* =====================
+   STOCK MOVEMENTS (IN)
+===================== */
+export async function listStockMovements(limit = 50) {
+  const { data } = await api.get("/admin/stock-movements", { params: { limit } });
+  return unwrapList(data);
+}
+
+export async function stockMove(payload) {
+  const body = {
+    part_id: payload.partId,
+    type: "IN",
+    qty: Number(payload.qty ?? 0),
+    note: payload.note ?? null,
+    date: payload.date ?? null,
+    ref: payload.ref ?? null,
   };
 
-  db.parts.unshift(part);
-  saveDb(db);
-  return part;
+  const { data } = await api.post("/admin/stock-movements", body);
+  const res = unwrapItem(data);
+  return res?.movement ?? res;
 }
 
-// export function updatePart(id, patch) {
-//   const db = loadDb();
-//   const p = db.parts.find(x => x.id === id);
-//   if (!p) throw new Error("Sparepart tidak ditemukan.");
+/* =====================
+   PART USAGE (Teknisi Request → Admin Approve/Reject)
+===================== */
 
-//   if (patch.name !== undefined) p.name = patch.name.trim();
-//   if (patch.minStock !== undefined) p.minStock = Number(patch.minStock || 0);
-//   if (patch.buyPrice !== undefined) p.buyPrice = Number(patch.buyPrice || 0);
+/*List permintaan sparepart dari teknisi*/
+export async function listPartUsages({ status = "", limit = 50 } = {}) {
+  const params = { limit };
+  if (status) params.status = status;
 
-//   saveDb(db);
-//   return p;
-// }
-
-export function deletePart(id) {
-  const db = loadDb();
-  db.parts = db.parts.filter(p => p.id !== id);
-  saveDb(db);
+  const { data } = await api.get("/admin/part-usages", { params });
+  return unwrapList(data);
 }
 
-export function stockMove({ partId, type, qty, note, date, ref }) {
-  const db = loadDb();
-  const p = db.parts.find(x => x.id === partId);
-  if (!p) throw new Error("Sparepart tidak ditemukan.");
-  const n = Number(qty);
-  if (!n || n <= 0) throw new Error("Qty harus > 0.");
-  if (!["IN", "OUT"].includes(type)) throw new Error("Type tidak valid.");
+export async function approvePartUsage(id, payload = {}) {
+  // backend kamu validasi: admin_note
+  const body = {
+    admin_note: payload.admin_note ?? payload.note ?? null,
+  };
 
-  if (type === "OUT" && p.stock < n) throw new Error("Stok tidak cukup.");
-
-  p.stock = type === "IN" ? p.stock + n : p.stock - n;
-
-  db.stockMovements.unshift({
-    id: uid("sm"),
-    partId,
-    type,
-    qty: n,
-    note: (note || "").trim(),
-    date: date || new Date().toISOString().slice(0, 10),
-    ref: ref || "",
-  });
-
-  saveDb(db);
-  return p;
+  const { data } = await api.post(`/admin/part-usages/${id}/approve`, body);
+  return unwrapItem(data);
 }
 
-export function listStockMovements() {
-  const db = loadDb();
-  return db.stockMovements;
-}
+/*Reject request sparepart*/
+export async function rejectPartUsage(id, payload = {}) {
+  const body = {
+    reason: payload.reason ?? payload.note ?? null,
+  };
 
-export function updatePart(id, { name, sku, minStock, buyPrice }) {
-  const db = loadDb();
-  const p = db.parts.find(x => x.id === id);
-  if (!p) throw new Error("Sparepart tidak ditemukan.");
-
-  const newName = String(name || "").trim();
-  const newSku = String(sku || "").trim().toUpperCase();
-
-  if (!newName) throw new Error("Nama sparepart wajib diisi.");
-  if (!newSku) throw new Error("SKU wajib diisi.");
-
-  // SKU unik (kecuali item itu sendiri)
-  const exists = db.parts.some(x => x.id !== id && (x.sku || "").toUpperCase() === newSku);
-  if (exists) throw new Error("SKU sudah digunakan.");
-
-  p.name = newName;
-  p.sku = newSku;
-  p.minStock = Number(minStock || 0);
-  p.buyPrice = Number(buyPrice || 0);
-
-  saveDb(db);
-  return p;
+  const { data } = await api.post(`/admin/part-usages/${id}/reject`, body);
+  return unwrapItem(data);
 }
