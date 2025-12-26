@@ -3,13 +3,15 @@ import {
   createVehicle,
   deleteVehicle,
   listVehicles,
-  updateVehicle, // <-- pastikan ada di service kamu
+  updateVehicle,
 } from "../../services/vehiclesService";
 
 export default function VehiclesList() {
   // ===== FORM STATE =====
   const [brand, setBrand] = useState("");
-  const [plate, setPlate] = useState("");
+  const [model, setModel] = useState("");
+  const [plateNumber, setPlateNumber] = useState("");
+  const [year, setYear] = useState("");
 
   // ===== SEARCH + DEBOUNCE =====
   const [search, setSearch] = useState("");
@@ -19,75 +21,132 @@ export default function VehiclesList() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   // ===== SORT =====
-  const [sort, setSort] = useState({ key: "brand", dir: "asc" }); // key: brand|plate
+  const [sort, setSort] = useState({ key: "brand", dir: "asc" }); // brand|plate_number|model|year
 
   // ===== TOAST =====
-  const [toast, setToast] = useState(null); // {type:'success'|'error', msg:string}
+  const [toast, setToast] = useState(null);
 
   // ===== DELETE MODAL =====
-  const [deleteTarget, setDeleteTarget] = useState(null); // {id, brand, plate} | null
+  const [deleteTarget, setDeleteTarget] = useState(null);
 
   // ===== INLINE EDIT =====
   const [editingId, setEditingId] = useState(null);
   const [editBrand, setEditBrand] = useState("");
-  const [editPlate, setEditPlate] = useState("");
+  const [editModel, setEditModel] = useState("");
+  const [editPlateNumber, setEditPlateNumber] = useState("");
+  const [editYear, setEditYear] = useState("");
 
-  // ===== LOAD VEHICLES =====
-  const vehiclesRaw = useMemo(() => {
-    // listVehicles(search) kamu kemungkinan sudah filter di service.
-    // Kita lempar debouncedSearch agar tidak "ngegas" tiap ketik 1 huruf.
-    return listVehicles(debouncedSearch);
-  }, [debouncedSearch, refreshKey]);
+  // ===== DATA STATE (ASYNC) =====
+  const [vehiclesRaw, setVehiclesRaw] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  // ===== HELPERS =====
+  const refresh = () => setRefreshKey((x) => x + 1);
+  const showToast = (type, msg) => setToast({ type, msg });
+
+  const parseYear = (v) => {
+    const n = Number(String(v).trim());
+    if (!n) return null;
+    if (n < 1900 || n > new Date().getFullYear() + 1) return null;
+    return n;
+  };
+
+  /* =========================
+     PLATE VALIDATION (WAJIB "B 1239 ODF")
+  ========================= */
+  const isValidPlateFormat = (s) => {
+    const plate = normalizePlateFinal(s);
+    // [Huruf 1-2] spasi [Angka 1-4] spasi [Huruf 1-3]
+    return /^[A-Z]{1,2}\s\d{1,4}\s[A-Z]{1,3}$/.test(plate);
+  };
+
+  // brand wajib minimal 2 char, plate wajib format dengan spasi
+  const validateForm = (b, p) => {
+    const brandOk = (b ?? "").trim().length >= 2;
+    const plateOk = isValidPlateFormat(p);
+    return brandOk && plateOk;
+  };
+
+  const canSubmit = validateForm(brand, plateNumber);
+
+  // ===== FETCH VEHICLES (ASYNC) =====
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await listVehicles();
+        if (!alive) return;
+        setVehiclesRaw(Array.isArray(data) ? data : []);
+      } catch (err) {
+        if (!alive) return;
+        showToast("error", err?.message || "Gagal memuat kendaraan.");
+        setVehiclesRaw([]);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
+
+  // ===== FILTER (CLIENT-SIDE SEARCH) =====
+  const filtered = useMemo(() => {
+    const q = (debouncedSearch || "").trim().toLowerCase();
+    if (!q) return vehiclesRaw;
+
+    return vehiclesRaw.filter((v) => {
+      const brand = (v.brand || "").toLowerCase();
+      const model = (v.model || "").toLowerCase();
+      const plate = (v.plate_number || "").toLowerCase();
+      const year = v.year != null ? String(v.year) : "";
+      return (
+        brand.includes(q) || model.includes(q) || plate.includes(q) || year.includes(q)
+      );
+    });
+  }, [vehiclesRaw, debouncedSearch]);
 
   // ===== SORTED VEHICLES =====
   const vehicles = useMemo(() => {
-    const arr = [...vehiclesRaw];
+    const arr = [...filtered];
     const { key, dir } = sort;
 
     arr.sort((a, b) => {
-      const va = (a[key] || "").toString().toLowerCase();
-      const vb = (b[key] || "").toString().toLowerCase();
+      const va = (a[key] ?? "").toString().toLowerCase();
+      const vb = (b[key] ?? "").toString().toLowerCase();
       if (va < vb) return dir === "asc" ? -1 : 1;
       if (va > vb) return dir === "asc" ? 1 : -1;
       return 0;
     });
 
     return arr;
-  }, [vehiclesRaw, sort]);
-
-  // ===== HELPERS =====
-  const refresh = () => setRefreshKey((x) => x + 1);
-
-  const showToast = (type, msg) => setToast({ type, msg });
-
-  const normalizedPlate = (value) => normalizePlate(value);
-
-  const validateForm = (b, p) => {
-    const brandOk = b.trim().length >= 2;
-    const plateOk = normalizePlate(p).length >= 4; // simple rule biar gak ribet
-    return brandOk && plateOk;
-  };
-
-  const canSubmit = validateForm(brand, plate);
+  }, [filtered, sort]);
 
   // ===== ADD =====
-  const onAdd = (e) => {
+  const onAdd = async (e) => {
     e.preventDefault();
 
     const payload = {
-      brand: brand.trim(),
-      plate: normalizePlate(plate),
+      brand: brand.trim() || null,
+      model: model.trim() || null,
+      plate_number: normalizePlateFinal(plateNumber),
+      year: parseYear(year),
     };
 
-    if (!validateForm(payload.brand, payload.plate)) {
-      showToast("error", "Isi merk & plat dulu ya. Yang benar, bukan yang baper.");
+    if (!validateForm(payload.brand ?? "", payload.plate_number)) {
+      showToast("error", 'Plat wajib format "B 1239 ODF" (pakai spasi).');
       return;
     }
 
     try {
-      createVehicle(payload);
+      await createVehicle(payload);
       setBrand("");
-      setPlate("");
+      setModel("");
+      setPlateNumber("");
+      setYear("");
       refresh();
       showToast("success", "Kendaraan berhasil ditambahkan ✅");
     } catch (err) {
@@ -98,10 +157,10 @@ export default function VehiclesList() {
   // ===== DELETE =====
   const requestDelete = (v) => setDeleteTarget(v);
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
-      deleteVehicle(deleteTarget.id);
+      await deleteVehicle(deleteTarget.id);
       setDeleteTarget(null);
       refresh();
       showToast("success", "Kendaraan dihapus 🗑️");
@@ -114,29 +173,34 @@ export default function VehiclesList() {
   const startEdit = (v) => {
     setEditingId(v.id);
     setEditBrand(v.brand || "");
-    setEditPlate(v.plate || "");
+    setEditModel(v.model || "");
+    setEditPlateNumber(v.plate_number || "");
+    setEditYear(v.year != null ? String(v.year) : "");
   };
 
   const cancelEdit = () => {
     setEditingId(null);
     setEditBrand("");
-    setEditPlate("");
+    setEditModel("");
+    setEditPlateNumber("");
+    setEditYear("");
   };
 
-  const saveEdit = (id) => {
+  const saveEdit = async (id) => {
     const payload = {
-      id,
-      brand: editBrand.trim(),
-      plate: normalizePlate(editPlate),
+      brand: editBrand.trim() || null,
+      model: editModel.trim() || null,
+      plate_number: normalizePlateFinal(editPlateNumber),
+      year: parseYear(editYear),
     };
 
-    if (!validateForm(payload.brand, payload.plate)) {
-      showToast("error", "Data edit belum valid. Jangan asal ganti plat.");
+    if (!validateForm(payload.brand ?? "", payload.plate_number)) {
+      showToast("error", 'Plat edit wajib format "B 1239 ODF" (pakai spasi).');
       return;
     }
 
     try {
-      updateVehicle(payload); // <-- penting
+      await updateVehicle(id, payload);
       cancelEdit();
       refresh();
       showToast("success", "Perubahan disimpan ✨");
@@ -157,7 +221,6 @@ export default function VehiclesList() {
     <div>
       <h2 style={{ marginTop: 0, color: THEME.textTitle }}>Kendaraan</h2>
 
-      {/* TOAST */}
       <Toast toast={toast} onClose={() => setToast(null)} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -167,34 +230,65 @@ export default function VehiclesList() {
 
           <form onSubmit={onAdd} style={{ display: "grid", gap: 10 }}>
             <input
-              placeholder="Merk (contoh: Toyota)"
+              placeholder="Brand"
               value={brand}
               onChange={(e) => setBrand(e.target.value)}
               style={inp()}
               required
+              disabled={loading}
             />
 
             <input
-              placeholder="Plat (contoh: N 1234 AB)"
-              value={plate}
-              onChange={(e) => setPlate(normalizedPlate(e.target.value))}
+              placeholder="Model (opsional)"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
               style={inp()}
-              required
+              disabled={loading}
             />
 
-            <button style={btnPrimary(!canSubmit)} type="submit" disabled={!canSubmit}>
-              Simpan
+            <input
+              placeholder='Plat (contoh: "B 1239 ODF")'
+              value={plateNumber}
+              onChange={(e) => setPlateNumber(normalizePlateTyping(e.target.value))}
+              onBlur={() => setPlateNumber(normalizePlateFinal(plateNumber))}
+              style={inp()}
+              required
+              disabled={loading}
+            />
+
+            <input
+              placeholder="Tahun (opsional)"
+              value={year}
+              onChange={(e) => setYear(e.target.value.replace(/[^\d]/g, ""))}
+              style={inp()}
+              inputMode="numeric"
+              disabled={loading}
+            />
+
+            <button
+              style={btnPrimary(!canSubmit || loading)}
+              type="submit"
+              disabled={!canSubmit || loading}
+            >
+              {loading ? "Memuat..." : "Simpan"}
             </button>
           </form>
 
           <p style={{ marginTop: 10, color: THEME.textMuted, fontSize: 13 }}>
-            Plat nomor wajib unik. Kalau sama, akan ditolak.
+            Plate number wajib unik. Kalau sama, backend bakal nolak (tegas tapi adil).
           </p>
         </div>
 
         {/* RIGHT: LIST */}
         <div style={card()}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+            }}
+          >
             <h3 style={{ marginTop: 0, color: THEME.textTitle }}>Daftar Kendaraan</h3>
             <div style={{ color: THEME.textMuted, fontSize: 13 }}>
               Total: <b style={{ color: THEME.textStrong }}>{vehicles.length}</b>
@@ -202,20 +296,31 @@ export default function VehiclesList() {
           </div>
 
           <input
-            placeholder="Search merk/plat..."
+            placeholder="Search brand/model/plat..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             style={{ ...inp(), width: "95%", marginBottom: 10 }}
+            disabled={loading}
           />
 
           <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ background: THEME.tableHeadBg, color: THEME.textTitle }}>
                 <th align="left" style={thClickable()} onClick={() => toggleSort("brand")}>
-                  Merk {sortIcon(sort, "brand")}
+                  Brand {sortIcon(sort, "brand")}
                 </th>
-                <th align="left" style={thClickable()} onClick={() => toggleSort("plate")}>
-                  Plat {sortIcon(sort, "plate")}
+                <th align="left" style={thClickable()} onClick={() => toggleSort("model")}>
+                  Model {sortIcon(sort, "model")}
+                </th>
+                <th
+                  align="left"
+                  style={thClickable()}
+                  onClick={() => toggleSort("plate_number")}
+                >
+                  Plate {sortIcon(sort, "plate_number")}
+                </th>
+                <th align="left" style={thClickable()} onClick={() => toggleSort("year")}>
+                  Year {sortIcon(sort, "year")}
                 </th>
                 <th align="left">Aksi</th>
               </tr>
@@ -233,42 +338,94 @@ export default function VehiclesList() {
                           value={editBrand}
                           onChange={(e) => setEditBrand(e.target.value)}
                           style={{ ...inp(), width: "100%" }}
+                          disabled={loading}
                         />
                       ) : (
                         <Highlighted text={v.brand} q={debouncedSearch} />
                       )}
                     </td>
 
+                    <td style={{ color: THEME.textBody }}>
+                      {isEditing ? (
+                        <input
+                          value={editModel}
+                          onChange={(e) => setEditModel(e.target.value)}
+                          style={{ ...inp(), width: "100%" }}
+                          disabled={loading}
+                        />
+                      ) : (
+                        <Highlighted text={v.model} q={debouncedSearch} />
+                      )}
+                    </td>
+
                     <td>
                       {isEditing ? (
                         <input
-                          value={editPlate}
-                          onChange={(e) => setEditPlate(normalizePlate(e.target.value))}
+                          value={editPlateNumber}
+                          onChange={(e) => setEditPlateNumber(normalizePlateTyping(e.target.value))}
+                          onBlur={() =>
+                            setEditPlateNumber(normalizePlateFinal(editPlateNumber))
+                          }
                           style={{ ...inp(), width: "100%" }}
+                          disabled={loading}
                         />
                       ) : (
                         <b style={{ color: THEME.textStrong }}>
-                          <Highlighted text={v.plate} q={debouncedSearch} strong />
+                          <Highlighted text={v.plate_number} q={debouncedSearch} strong />
                         </b>
+                      )}
+                    </td>
+
+                    <td style={{ color: THEME.textBody }}>
+                      {isEditing ? (
+                        <input
+                          value={editYear}
+                          onChange={(e) => setEditYear(e.target.value.replace(/[^\d]/g, ""))}
+                          style={{ ...inp(), width: "100%" }}
+                          inputMode="numeric"
+                          disabled={loading}
+                        />
+                      ) : (
+                        <span>{v.year ?? "-"}</span>
                       )}
                     </td>
 
                     <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       {isEditing ? (
                         <>
-                          <button onClick={() => saveEdit(v.id)} style={btnPrimary(false)} type="button">
+                          <button
+                            onClick={() => saveEdit(v.id)}
+                            style={btnPrimary(false)}
+                            type="button"
+                            disabled={loading}
+                          >
                             Simpan
                           </button>
-                          <button onClick={cancelEdit} style={btnGhost()} type="button">
+                          <button
+                            onClick={cancelEdit}
+                            style={btnGhost()}
+                            type="button"
+                            disabled={loading}
+                          >
                             Batal
                           </button>
                         </>
                       ) : (
                         <>
-                          <button onClick={() => startEdit(v)} style={btnGhost()} type="button">
+                          <button
+                            onClick={() => startEdit(v)}
+                            style={btnGhost()}
+                            type="button"
+                            disabled={loading}
+                          >
                             Edit
                           </button>
-                          <button onClick={() => requestDelete(v)} style={btnDanger()} type="button">
+                          <button
+                            onClick={() => requestDelete(v)}
+                            style={btnDanger()}
+                            type="button"
+                            disabled={loading}
+                          >
                             Hapus
                           </button>
                         </>
@@ -280,8 +437,10 @@ export default function VehiclesList() {
 
               {!vehicles.length && (
                 <tr>
-                  <td colSpan="3" style={{ color: THEME.textMuted }}>
-                    Belum ada data. Tambahin 1 dulu biar tabelnya gak kesepian.
+                  <td colSpan="5" style={{ color: THEME.textMuted }}>
+                    {loading
+                      ? "Memuat data..."
+                      : "Belum ada data. Tambahin 1 dulu biar tabelnya punya teman ngobrol."}
                   </td>
                 </tr>
               )}
@@ -290,17 +449,20 @@ export default function VehiclesList() {
         </div>
       </div>
 
-      {/* DELETE MODAL */}
       <Modal
         open={!!deleteTarget}
         title="Konfirmasi Hapus"
         onClose={() => setDeleteTarget(null)}
         footer={
           <>
-            <button style={btnGhost()} onClick={() => setDeleteTarget(null)}>
+            <button
+              style={btnGhost()}
+              onClick={() => setDeleteTarget(null)}
+              disabled={loading}
+            >
               Batal
             </button>
-            <button style={btnDanger()} onClick={confirmDelete}>
+            <button style={btnDanger()} onClick={confirmDelete} disabled={loading}>
               Ya, Hapus
             </button>
           </>
@@ -310,10 +472,10 @@ export default function VehiclesList() {
           <div style={{ color: THEME.textBody, lineHeight: 1.5 }}>
             Hapus kendaraan:
             <div style={{ marginTop: 8 }}>
-              <b>{deleteTarget.brand}</b> — <b>{deleteTarget.plate}</b>
+              <b>{deleteTarget.brand}</b> — <b>{deleteTarget.plate_number}</b>
             </div>
             <div style={{ marginTop: 8, color: THEME.textMuted, fontSize: 13 }}>
-              Ini beneran dihapus ya, bukan di-“ghosting”.
+              Ini beneran dihapus ya, bukan di-"seen" doang.
             </div>
           </div>
         ) : null}
@@ -334,11 +496,21 @@ function useDebounce(value, delay = 300) {
   return v;
 }
 
-function normalizePlate(s) {
+/* =========================
+   PLATE NORMALIZE
+========================= */
+function normalizePlateTyping(s) {
+  // enak buat input: boleh trailing space, tapi tetap rapi
   return (s || "")
     .toUpperCase()
     .replace(/[^A-Z0-9 ]/g, " ")
-    .replace(/\s+/g, " ");
+    .replace(/\s+/g, " ")
+    .replace(/^\s+/, ""); // hapus spasi di depan saja
+}
+
+function normalizePlateFinal(s) {
+  // buat simpan: no leading/trailing spaces
+  return normalizePlateTyping(s).trim();
 }
 
 /* =========================
@@ -434,7 +606,7 @@ function Modal({ open, title, children, footer, onClose }) {
       <div
         onMouseDown={(e) => e.stopPropagation()}
         style={{
-          width: "min(520px, 100%)",
+          width: "min(720px, 100%)",
           background: "#fff",
           borderRadius: 18,
           border: `1px solid ${THEME.borderSoft}`,
@@ -482,12 +654,10 @@ const THEME = {
   border: "#bfdbfe",
   borderSoft: "#e0e7ff",
   tableHeadBg: "#eff6ff",
-
   textTitle: "#1e3a8a",
   textStrong: "#0f172a",
   textBody: "#334155",
   textMuted: "#64748b",
-
   danger: "#b00020",
 };
 
