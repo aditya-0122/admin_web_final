@@ -1,35 +1,159 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   createPart,
   deletePart,
   listParts,
   listStockMovements,
   stockMove,
-  updatePart, 
+  updatePart,
+
+  //  approve/reject permintaan teknisi
+  listPartUsages,
+  approvePartUsage,
+  rejectPartUsage,
 } from "../../services/inventoryService";
+
+// socket client
+import { socket } from "../../lib/socket";
 
 export default function Inventory() {
   const [search, setSearch] = useState("");
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  // create form
+  // data
+  const [parts, setParts] = useState([]);
+  const [moves, setMoves] = useState([]);
+
+  // data part usage request (pending)
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usages, setUsages] = useState([]);
+
+  // create/edit form
   const [name, setName] = useState("");
   const [sku, setSku] = useState("");
   const [stock, setStock] = useState(0);
   const [minStock, setMinStock] = useState(0);
   const [buyPrice, setBuyPrice] = useState(0);
-
-  // edit mode
   const [editingId, setEditingId] = useState(null);
 
-  // stock move form (IN only)
+  // stock IN form
   const [partId, setPartId] = useState("");
-  const [type] = useState("IN"); // dikunci
   const [qty, setQty] = useState(1);
   const [note, setNote] = useState("");
 
-  const parts = useMemo(() => listParts(search), [search, msg]);
-  const moves = useMemo(() => listStockMovements(), [msg]);
+  // note untuk approve / reject
+  const [approveNote, setApproveNote] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+
+  const loadAll = async () => {
+    setLoading(true);
+    setMsg("");
+    try {
+      const [p, m] = await Promise.all([listParts(search), listStockMovements()]);
+      setParts(Array.isArray(p) ? p : []);
+      setMoves(Array.isArray(m) ? m : []);
+    } catch (e) {
+      setMsg(`${e.message}`);
+      setParts([]);
+      setMoves([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // load request sparepart (pending)
+  const loadUsages = async () => {
+    setUsageLoading(true);
+    setMsg("");
+    try {
+      const u = await listPartUsages({ status: "pending", limit: 100 });
+      setUsages(Array.isArray(u) ? u : []);
+    } catch (e) {
+      setMsg(`${e.message}`);
+      setUsages([]);
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  // load awal + kalau search berubah
+  useEffect(() => {
+    loadAll();
+    loadUsages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  useEffect(() => {
+    // connect socket sekali (aman kalau socket.io client auto-connect)
+    if (typeof socket?.connect === "function" && !socket.connected) {
+      socket.connect();
+    }
+
+    const joinAdminRoom = () => {
+      // dukung dua bentuk join biar kompatibel
+      try {
+        socket.emit("join", "admin");
+      } catch (_) {}
+      try {
+        socket.emit("join", { room: "admin" });
+      } catch (_) {}
+    };
+
+    const refreshUsages = () => loadUsages();
+    const refreshAll = () => {
+      loadAll();
+      loadUsages();
+    };
+
+    // === handler untuk server yang emit "event" umum ===
+    const onGenericEvent = (evt) => {
+      const type = evt?.type;
+
+      if (type === "part_usage.requested") refreshUsages();
+      if (type === "part_usage.rejected") refreshUsages();
+      if (type === "part_usage.approved") refreshAll();
+
+      if (type === "stock_movement.created") refreshAll();
+      if (type === "part.created" || type === "part.updated" || type === "part.deleted")
+        refreshAll();
+    };
+
+    // connect lifecycle
+    socket.on("connect", joinAdminRoom);
+
+    // kalau socket sudah keburu connected sebelum listener kepasang
+    if (socket.connected) joinAdminRoom();
+
+    // === event spesifik (recommended) ===
+    socket.on("part_usage.requested", refreshUsages);
+    socket.on("part_usage.rejected", refreshUsages);
+    socket.on("part_usage.approved", refreshAll);
+    socket.on("stock_movement.created", refreshAll);
+
+    // optional: kalau server kamu kirim event part CRUD
+    socket.on("part.created", refreshAll);
+    socket.on("part.updated", refreshAll);
+    socket.on("part.deleted", refreshAll);
+
+    // === event generic fallback ===
+    socket.on("event", onGenericEvent);
+
+    return () => {
+      socket.off("connect", joinAdminRoom);
+
+      socket.off("part_usage.requested", refreshUsages);
+      socket.off("part_usage.rejected", refreshUsages);
+      socket.off("part_usage.approved", refreshAll);
+      socket.off("stock_movement.created", refreshAll);
+
+      socket.off("part.created", refreshAll);
+      socket.off("part.updated", refreshAll);
+      socket.off("part.deleted", refreshAll);
+
+      socket.off("event", onGenericEvent);
+    };
+  }, []);
 
   const resetForm = () => {
     setName("");
@@ -40,47 +164,21 @@ export default function Inventory() {
     setEditingId(null);
   };
 
-  const onAddOrUpdate = (e) => {
+  const onAddOrUpdate = async (e) => {
     e.preventDefault();
     setMsg("");
-
     try {
-      // MODE EDIT
       if (editingId) {
-        updatePart(editingId, { name, sku, minStock, buyPrice });
-        resetForm();
-        setMsg("✅ Sparepart berhasil di-update.");
-        return;
+        await updatePart(editingId, { name, sku, minStock, buyPrice });
+        setMsg("Sparepart berhasil di-update.");
+      } else {
+        await createPart({ name, sku, stock, minStock, buyPrice });
+        setMsg("Sparepart ditambahkan.");
       }
-
-      // MODE CREATE
-      createPart({ name, sku, stock, minStock, buyPrice });
       resetForm();
-      setMsg("✅ Sparepart ditambahkan.");
+      await loadAll();
     } catch (e2) {
-      // ✅ kalau gagal karena SKU sudah dipakai, tawarkan update
-      const err = String(e2.message || "");
-      const skuUpper = String(sku || "").trim().toUpperCase();
-      const existing = parts.find(p => (p.sku || "").toUpperCase() === skuUpper);
-
-      if (err.toLowerCase().includes("sku") && existing) {
-        const ok = confirm(
-          `SKU "${skuUpper}" sudah ada (${existing.name}).\n` +
-          `Mau update data sparepart yang sudah ada ini?`
-        );
-        if (ok) {
-          setEditingId(existing.id);
-          setName(existing.name);
-          setSku(existing.sku);
-          setMinStock(existing.minStock ?? 0);
-          setBuyPrice(existing.buyPrice ?? 0);
-          setStock(0); // stok awal hanya untuk create
-          setMsg("✏️ Mode edit aktif. Silakan ubah lalu klik Update.");
-          return;
-        }
-      }
-
-      setMsg(`❌ ${e2.message}`);
+      setMsg(`${e2.message}`);
     }
   };
 
@@ -89,41 +187,111 @@ export default function Inventory() {
     setEditingId(p.id);
     setName(p.name || "");
     setSku(p.sku || "");
-    setStock(0); // stok awal hanya untuk create
-    setMinStock(Number(p.minStock || 0));
-    setBuyPrice(Number(p.buyPrice || 0));
+    setStock(0);
+    setMinStock(Number(p.min_stock ?? p.minStock ?? 0));
+    setBuyPrice(Number(p.buy_price ?? p.buyPrice ?? 0));
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const onDelete = (id) => {
+  const onDelete = async (id) => {
     if (!confirm("Hapus sparepart ini?")) return;
-    deletePart(id);
-    setMsg("✅ Sparepart dihapus.");
-    if (editingId === id) resetForm();
+    setMsg("");
+    try {
+      await deletePart(id);
+      setMsg("Sparepart dihapus.");
+      if (editingId === id) resetForm();
+      await loadAll();
+    } catch (e) {
+      setMsg(`${e.message}`);
+    }
   };
 
-  const onMove = (e) => {
+  const onMove = async (e) => {
     e.preventDefault();
     setMsg("");
     try {
-      // guard keras: OUT tidak boleh dari Inventory
-      if (type === "OUT") {
-        throw new Error("Stok keluar hanya dicatat dari pemakaian sparepart pada Repair (finalisasi).");
-      }
+      await stockMove({
+        partId,
+        type: "IN",
+        qty,
+        note,
+      });
 
-      stockMove({ partId, type: "IN", qty, note });
       setNote("");
       setQty(1);
       setPartId("");
       setMsg("✅ Stok masuk berhasil diperbarui.");
+      await loadAll();
     } catch (e2) {
       setMsg(`❌ ${e2.message}`);
     }
   };
 
+  //Approve request sparepart (stok OUT harus terjadi di backend)
+  const onApproveUsage = async (u) => {
+    if (!confirm("Approve permintaan sparepart ini? Stok akan OUT otomatis.")) return;
+    setMsg("");
+    try {
+      await approvePartUsage(u.id, {
+        note: approveNote || null,
+        ref: u?.ref ?? null,
+        date: null,
+      });
+      setApproveNote("");
+      setMsg("Permintaan disetujui. Stok OUT diproses.");
+      await Promise.all([loadAll(), loadUsages()]);
+    } catch (e) {
+      setMsg(`${e.message}`);
+    }
+  };
+
+  //Reject request sparepart
+  const onRejectUsage = async (u) => {
+    if (!confirm("Reject permintaan sparepart ini?")) return;
+    setMsg("");
+    try {
+      await rejectPartUsage(u.id, { reason: rejectReason || null });
+      setRejectReason("");
+      setMsg("Permintaan ditolak.");
+      await loadUsages();
+    } catch (e) {
+      setMsg(`${e.message}`);
+    }
+  };
+
+  // helper biar tanggalnya aman walau formatnya beda
+  const fmtDate = (x) => {
+    if (!x) return "-";
+    return String(x).slice(0, 10);
+  };
+
+  // helper aman baca relasi (u.part, u.damageReport, u.technician dll)
+  const uPartName = (u) => u?.part?.name ?? "-";
+  const uPartSku = (u) => u?.part?.sku ?? "-";
+  const uQty = (u) => u?.qty ?? "-";
+  const uTech = (u) => u?.technician?.username ?? u?.user?.username ?? "-";
+  const uReportId = (u) =>
+    u?.damage_report_id ?? u?.damageReport?.id ?? u?.damage_report?.id ?? "-";
+  const uPlate = (u) => {
+    const dr = u?.damageReport ?? u?.damage_report;
+    const v = dr?.vehicle;
+    return v?.plate_number ?? "-";
+  };
+
   return (
     <div>
       <h2 style={{ marginTop: 0 }}>Suku Cadang & Inventaris</h2>
+
+      {msg && (
+        <div
+          style={{
+            marginBottom: 10,
+            color: msg.startsWith("❌") ? "#b00020" : "#1b5e20",
+          }}
+        >
+          {msg}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 16 }}>
         <div style={card()}>
@@ -154,7 +322,6 @@ export default function Inventory() {
               required
             />
 
-            {/* stok awal hanya untuk create */}
             <input
               type="number"
               value={stock}
@@ -179,23 +346,14 @@ export default function Inventory() {
               style={inp()}
             />
 
-            <button style={btnPrimary()}>
-              {editingId ? "Update" : "Simpan"}
+            <button style={btnPrimary()} disabled={loading}>
+              {loading ? "Loading..." : editingId ? "Update" : "Simpan"}
             </button>
           </form>
-
-          {msg && (
-            <div style={{ marginTop: 10, color: msg.startsWith("❌") ? "#b00020" : "#1b5e20" }}>
-              {msg}
-            </div>
-          )}
         </div>
 
         <div style={card()}>
           <h3 style={{ marginTop: 0 }}>Stok Masuk (Restock)</h3>
-          <div style={{ color: "#666", fontSize: 13, marginBottom: 10 }}>
-            Stok <b>keluar</b> tidak bisa dari sini. Keluar otomatis saat <b>Repair finalisasi</b>.
-          </div>
 
           <form onSubmit={onMove} style={{ display: "grid", gap: 10 }}>
             <select value={partId} onChange={(e) => setPartId(e.target.value)} style={inp()} required>
@@ -207,21 +365,77 @@ export default function Inventory() {
               ))}
             </select>
 
-            {/* type dikunci IN */}
             <select value="IN" style={inp()} disabled>
               <option value="IN">IN (Masuk)</option>
             </select>
 
-            <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={inp()} />
-            <input
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Catatan (opsional)"
-              style={inp()}
-            />
-            <button style={btnPrimary()}>Proses IN</button>
+            <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={inp()} min={1} />
+            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Catatan (opsional)" style={inp()} />
+            <button style={btnPrimary()} disabled={loading}>
+              Proses IN
+            </button>
           </form>
         </div>
+      </div>
+
+      {/*Approval request sparepart teknisi */}
+      <div style={{ ...card(), marginTop: 16 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <h3 style={{ margin: 0, flex: 1 }}>Approval Permintaan Sparepart (Teknisi)</h3>
+          <button style={btnSecondary()} onClick={loadUsages} disabled={usageLoading} type="button">
+            {usageLoading ? "Loading..." : "Refresh"}
+          </button>
+        </div>
+
+        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <input value={approveNote} onChange={(e) => setApproveNote(e.target.value)} placeholder="Catatan approve (opsional)" style={inp()} />
+          <input value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} placeholder="Alasan reject (opsional)" style={inp()} />
+        </div>
+
+        <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse", marginTop: 10 }}>
+          <thead>
+            <tr style={{ background: "#f3f4f6" }}>
+              <th align="left">Tanggal</th>
+              <th align="left">Teknisi</th>
+              <th align="left">Laporan</th>
+              <th align="left">Plat</th>
+              <th align="left">Sparepart</th>
+              <th align="left">Qty</th>
+              <th align="left">Status</th>
+              <th align="left">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            {usages.map((u) => (
+              <tr key={u.id} style={{ borderBottom: "1px solid #eee" }}>
+                <td>{fmtDate(u.created_at ?? u.date)}</td>
+                <td>{uTech(u)}</td>
+                <td>#{uReportId(u)}</td>
+                <td>{uPlate(u)}</td>
+                <td>
+                  <b>{uPartSku(u)}</b> — {uPartName(u)}
+                </td>
+                <td>{uQty(u)}</td>
+                <td style={{ color: "#111" }}>{u.status ?? "pending"}</td>
+                <td style={{ display: "flex", gap: 8 }}>
+                  <button style={btnPrimarySmall()} onClick={() => onApproveUsage(u)}>
+                    Approve
+                  </button>
+                  <button style={btnDanger()} onClick={() => onRejectUsage(u)}>
+                    Reject
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {!usages.length && (
+              <tr>
+                <td colSpan="8" style={{ color: "#666" }}>
+                  Belum ada permintaan sparepart (pending).
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       <div style={{ ...card(), marginTop: 16 }}>
@@ -249,16 +463,27 @@ export default function Inventory() {
           <tbody>
             {parts.map((p) => (
               <tr key={p.id} style={{ borderBottom: "1px solid #eee" }}>
-                <td><b>{p.sku}</b></td>
-                <td>{p.name}</td>
-                <td style={{ color: p.stock <= p.minStock ? "#b00020" : "#111" }}>
-                  {p.stock} {p.stock <= p.minStock ? "(menipis)" : ""}
+                <td>
+                  <b>{p.sku}</b>
                 </td>
-                <td>{p.minStock}</td>
-                <td>{Number(p.buyPrice || 0).toLocaleString("id-ID")}</td>
+                <td>{p.name}</td>
+                <td
+                  style={{
+                    color:
+                      Number(p.stock) <= Number(p.min_stock ?? p.minStock ?? 0) ? "#b00020" : "#111",
+                  }}
+                >
+                  {p.stock}
+                </td>
+                <td>{p.min_stock ?? p.minStock}</td>
+                <td>{Number(p.buy_price ?? p.buyPrice ?? 0).toLocaleString("id-ID")}</td>
                 <td style={{ display: "flex", gap: 8 }}>
-                  <button style={btnSecondary()} onClick={() => onEdit(p)}>Edit</button>
-                  <button style={btnDanger()} onClick={() => onDelete(p.id)}>Hapus</button>
+                  <button style={btnSecondary()} onClick={() => onEdit(p)}>
+                    Edit
+                  </button>
+                  <button style={btnDanger()} onClick={() => onDelete(p.id)}>
+                    Hapus
+                  </button>
                 </td>
               </tr>
             ))}
@@ -273,10 +498,13 @@ export default function Inventory() {
         </table>
 
         <h4 style={{ marginTop: 16 }}>Log Mutasi Stok</h4>
+
         <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "#f3f4f6" }}>
               <th align="left">Tanggal</th>
+              <th align="left">Sparepart</th>
+              <th align="left">SKU</th>
               <th align="left">Type</th>
               <th align="left">Qty</th>
               <th align="left">Note</th>
@@ -285,7 +513,9 @@ export default function Inventory() {
           <tbody>
             {moves.slice(0, 10).map((m) => (
               <tr key={m.id} style={{ borderBottom: "1px solid #eee" }}>
-                <td>{m.date}</td>
+                <td>{fmtDate(m.date ?? m.movement_date ?? m.created_at)}</td>
+                <td>{m.part?.name ?? "-"}</td>
+                <td>{m.part?.sku ?? "-"}</td>
                 <td>{m.type}</td>
                 <td>{m.qty}</td>
                 <td style={{ color: "#555" }}>
@@ -296,7 +526,7 @@ export default function Inventory() {
             ))}
             {!moves.length && (
               <tr>
-                <td colSpan="4" style={{ color: "#666" }}>
+                <td colSpan="6" style={{ color: "#666" }}>
                   Belum ada mutasi.
                 </td>
               </tr>
@@ -308,37 +538,80 @@ export default function Inventory() {
   );
 }
 
-const card = () => ({ background: "#fff", padding: 14, borderRadius: 14 });
-const inp = () => ({ padding: 10, borderRadius: 10, border: "1px solid #ddd" });
+const theme = {
+  primary: "#3B82F6",        
+  primarySoft: "#DBEAFE",    
+  primaryBorder: "#BFDBFE",  
+  primaryDark: "#1D4ED8",    
+  text: "#0F172A",
+  muted: "#64748B",
+  danger: "#DC2626",
+  dangerBorder: "#FECACA",
+  white: "#FFFFFF",
+};
+
+const card = () => ({
+  background: theme.white,
+  padding: 14,
+  borderRadius: 14,
+  border: `1px solid ${theme.primaryBorder}`,
+  boxShadow: "0 4px 14px rgba(59,130,246,0.12)",
+});
+
+const inp = () => ({
+  padding: 10,
+  borderRadius: 10,
+  border: `1px solid ${theme.primaryBorder}`,
+  outline: "none",
+  background: theme.white,
+  color: theme.text,
+});
+
 const btnPrimary = () => ({
   padding: 10,
   borderRadius: 10,
   border: "none",
-  background: "#111",
+  background: theme.primary,
   color: "#fff",
   cursor: "pointer",
+  fontWeight: 600,
 });
+
+const btnPrimarySmall = () => ({
+  padding: "6px 10px",
+  borderRadius: 10,
+  border: "none",
+  background: theme.primary,
+  color: "#fff",
+  cursor: "pointer",
+  fontWeight: 600,
+});
+
 const btnSecondary = () => ({
   padding: "6px 10px",
   borderRadius: 10,
-  border: "1px solid #ddd",
-  background: "#fff",
-  color: "#111",
+  border: `1px solid ${theme.primaryBorder}`,
+  background: theme.primarySoft,
+  color: theme.primaryDark,
   cursor: "pointer",
+  fontWeight: 600,
 });
+
 const btnDanger = () => ({
   padding: "6px 10px",
   borderRadius: 10,
-  border: "1px solid #f2b8b5",
-  background: "#fff",
-  color: "#b00020",
+  border: `1px solid ${theme.dangerBorder}`,
+  background: "#FEF2F2",
+  color: theme.danger,
   cursor: "pointer",
+  fontWeight: 600,
 });
+
 const btnGhost = () => ({
   padding: "6px 10px",
   borderRadius: 10,
-  border: "1px solid #e5e7eb",
-  background: "#fff",
-  color: "#111",
+  border: `1px solid ${theme.primaryBorder}`,
+  background: theme.white,
+  color: theme.primaryDark,
   cursor: "pointer",
 });
