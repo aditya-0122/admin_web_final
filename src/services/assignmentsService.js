@@ -1,33 +1,22 @@
-import { loadDb, saveDb, uid } from "./fakeDb.js";
+import { api } from "./api";
 
-export function listAssignments() {
-  const db = loadDb();
-  return db.assignments;
+// GET /api/admin/vehicle-assignments
+export async function listAssignments() {
+  const res = await api.get("/admin/vehicle-assignments");
+  return res.data;
 }
 
-export function createAssignment({ vehicleId, driverId, date }) {
-  const db = loadDb();
-
-  const driver = db.users.find(u => u.id === driverId && u.role === "driver" && u.active);
-  if (!driver) throw new Error("Driver tidak valid atau nonaktif.");
-
-  const vehicle = db.vehicles.find(v => v.id === vehicleId);
-  if (!vehicle) throw new Error("Kendaraan tidak ditemukan.");
-
-  // Jika kendaraan sudah di-assign, overwrite (anggap pindah driver)
-  const existing = db.assignments.find(a => a.vehicleId === vehicleId);
-  if (existing) {
-    existing.driverId = driverId;
-    existing.date = date;
-  } else {
-    db.assignments.unshift({ id: uid("a"), vehicleId, driverId, date });
-  }
-
-  saveDb(db);
+// POST /api/admin/vehicle-assignments
+export async function createAssignment({ vehicle_id, driver_id }) {
+  const res = await api.post("/admin/vehicle-assignments", {
+    vehicle_id: Number(vehicle_id),
+    driver_id: Number(driver_id),
+  });
+  return res.data;
 }
 
-export function deleteAssignment(id) {
-  const db = loadDb();
-  db.assignments = db.assignments.filter(a => a.id !== id);
-  saveDb(db);
+// DELETE /api/admin/vehicle-assignments/{id}
+export async function deleteAssignment(id) {
+  const res = await api.delete(`/admin/vehicle-assignments/${id}`);
+  return res.data;
 }
