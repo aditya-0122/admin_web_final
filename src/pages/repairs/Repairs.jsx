@@ -1,138 +1,236 @@
-import { useMemo, useState } from "react";
-import { loadDb } from "../../services/fakeDb";
+import { useEffect, useMemo, useState } from "react";
+import { listParts } from "../../services/inventoryService";
 import { finalizeRepair, listRepairs } from "../../services/repairsService";
+import { listTechnicians } from "../../services/usersService";
+import { socket } from "../../lib/socket";
 
 export default function Repairs() {
   const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(null);
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const db = useMemo(() => loadDb(), [msg]);
-  const parts = db.parts;
-  const technicians = db.users.filter(u => u.role === "technician");
-
-  const repairs = useMemo(() => listRepairs({ search }), [search, msg]);
-
-  const selected = repairs.find(r => r.id === selectedId);
+  const [repairs, setRepairs] = useState([]);
+  const [parts, setParts] = useState([]);
+  const [technicians, setTechnicians] = useState([]);
 
   // form finalisasi
-  const [technician, setTechnician] = useState("");
+  const [technicianId, setTechnicianId] = useState("");
   const [action, setAction] = useState("");
-  const [cost, setCost] = useState(0);
+  const [cost, setCost] = useState("");
 
   const [partId, setPartId] = useState("");
   const [qty, setQty] = useState(1);
   const [partsUsed, setPartsUsed] = useState([]);
 
+  const loadAll = async () => {
+    setLoading(true);
+    setMsg("");
+    try {
+      const [rData, pData, tData] = await Promise.all([
+        listRepairs({ search }),
+        listParts(""), // sesuai punyamu
+        listTechnicians(),
+      ]);
+
+      setRepairs(Array.isArray(rData) ? rData : []);
+      setParts(Array.isArray(pData) ? pData : []);
+      setTechnicians(Array.isArray(tData) ? tData : []);
+    } catch (e) {
+      setMsg(`❌ ${e?.message || "Gagal memuat data."}`);
+      setRepairs([]);
+      setParts([]);
+      setTechnicians([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  // ==========================
+  // 🔴 REALTIME REPAIR SYNC
+  // ==========================
+  useEffect(() => {
+    socket.connect();
+    socket.emit("join", "admin");
+
+    const refresh = () => loadAll();
+
+    socket.on("repair.created", refresh);
+    socket.on("repair.finalized", refresh);
+    socket.on("damage_report.followup_approved", refresh);
+
+    return () => {
+      socket.off("repair.created", refresh);
+      socket.off("repair.finalized", refresh);
+      socket.off("damage_report.followup_approved", refresh);
+      socket.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const selected = useMemo(() => {
+    if (!selectedId) return null;
+    return repairs.find((r) => Number(r.id) === Number(selectedId)) || null;
+  }, [repairs, selectedId]);
+
   const open = (r) => {
-    setSelectedId(r.id);
+    setSelectedId(Number(r.id));
     setMsg("");
 
-    setTechnician(r.technician || "");
+    // isi form:
+    setTechnicianId(r.technician_id ? String(r.technician_id) : "");
     setAction(r.action || "");
-    setCost(r.cost || 0);
+    setCost(r.cost != null ? String(r.cost) : "");
 
-    setPartsUsed(r.partsUsed || []);
+    setPartsUsed(Array.isArray(r.partsUsed) ? r.partsUsed : []);
     setPartId("");
     setQty(1);
   };
 
+  const resolvePart = (id) => parts.find((p) => Number(p.id) === Number(id));
+
   const addPart = () => {
     if (!partId) return;
+    const pid = Number(partId);
     const q = Number(qty);
-    if (!q || q <= 0) return;
+    if (!pid || !q || q <= 0) return;
 
-    setPartsUsed(prev => {
-      const exist = prev.find(x => x.partId === partId);
-      if (exist) return prev.map(x => x.partId === partId ? { ...x, qty: x.qty + q } : x);
-      return [...prev, { partId, qty: q }];
+    setPartsUsed((prev) => {
+      const exist = prev.find((x) => Number(x.partId) === pid);
+      if (exist) {
+        return prev.map((x) =>
+          Number(x.partId) === pid ? { ...x, qty: Number(x.qty) + q } : x
+        );
+      }
+      return [...prev, { partId: pid, qty: q }];
     });
 
     setPartId("");
     setQty(1);
   };
 
-  const removePart = (id) => setPartsUsed(prev => prev.filter(x => x.partId !== id));
-  const resolvePart = (id) => parts.find(p => p.id === id);
+  const removePart = (pid) =>
+    setPartsUsed((prev) => prev.filter((x) => Number(x.partId) !== Number(pid)));
 
-  const onFinalize = () => {
+  const onFinalize = async () => {
+    if (!selected) return;
+    setLoading(true);
+    setMsg("");
     try {
-      finalizeRepair({ id: selected.id, technician, action, cost, partsUsed });
-      setSelectedId("");
-      setMsg("OK");
+      await finalizeRepair({
+        id: selected.id,
+        technicianId, // ✅ ID angka (string di state tapi akan di-Number di service)
+        action,
+        cost,
+        partsUsed,
+      });
+
+      setSelectedId(null);
+      setMsg("✅ Finalisasi berhasil.");
+      await loadAll();
     } catch (e) {
-      setMsg(e.message || "Gagal.");
+      setMsg(`❌ ${e?.message || "Gagal."}`);
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div>
-      <h2 style={{ marginTop: 0 }}>Riwayat Perbaikan</h2>
+    <div style={{ paddingBottom: 40 }}>
+      <h2 style={{ marginTop: 0, color: THEME.textTitle }}>Riwayat Perbaikan</h2>
 
       <div style={card()}>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <h3 style={{ margin: 0, flex: 1 }}>Daftar Repair (hasil Generate dari Follow-up)</h3>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 15 }}>
+          <h3 style={{ margin: 0, flex: 1, color: THEME.textTitle }}>Daftar Repair</h3>
+
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="search plat/tindakan/teknisi..."
+            placeholder="Search plat/tindakan/teknisi..."
             style={{ ...inp(), width: 320 }}
           />
+
+          <button style={btn()} type="button" onClick={loadAll} disabled={loading}>
+            {loading ? "Loading..." : "Refresh"}
+          </button>
         </div>
 
-        <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse", marginTop: 10 }}>
+        {msg && (
+          <div style={{ marginBottom: 10, color: msg.startsWith("❌") ? THEME.danger : THEME.primary, fontWeight: 700 }}>
+            {msg}
+          </div>
+        )}
+
+        <table style={tableStyle()}>
           <thead>
-            <tr style={{ background: "#f3f4f6" }}>
-              <th align="left">Tanggal</th>
-              <th align="left">Plat</th>
-              <th align="left">Status</th>
-              <th align="left">Tindakan</th>
-              <th align="left">Biaya</th>
-              <th align="left">Aksi</th>
+            <tr>
+              <th style={thStyle()}>Tanggal</th>
+              <th style={thStyle()}>Plat</th>
+              <th style={thStyle()}>Status</th>
+              <th style={thStyle()}>Tindakan</th>
+              <th style={thStyle()}>Biaya</th>
+              <th style={thStyle()}>Aksi</th>
             </tr>
           </thead>
+
           <tbody>
-            {repairs.map(r => (
-              <tr key={r.id} style={{ borderBottom: "1px solid #eee" }}>
-                <td>{r.date}</td>
-                <td><b>{r.vehiclePlate}</b></td>
-                <td>
-                  <span style={{
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    background: r.finalized ? "#16a34a22" : "#f59e0b22",
-                    color: r.finalized ? "#16a34a" : "#f59e0b",
-                    fontWeight: 800
-                  }}>
-                    {r.finalized ? "FINAL" : "DRAFT"}
-                  </span>
+            {repairs.map((r) => (
+              <tr key={r.id}>
+                <td style={tdStyle()}>{r.date}</td>
+                <td style={tdStyle()}>
+                  <b style={{ color: THEME.textStrong }}>{r.vehiclePlate}</b>
                 </td>
-                <td>{r.action || <span style={{ color: "#666" }}>- belum diisi -</span>}</td>
-                <td>{Number(r.cost || 0).toLocaleString("id-ID")}</td>
-                <td><button style={btn()} onClick={() => open(r)}>{r.finalized ? "Lihat" : "Finalisasi"}</button></td>
+                <td style={tdStyle()}>
+                  <span style={statusPill(r.finalized)}>{r.finalized ? "FINAL" : "DRAFT"}</span>
+                </td>
+                <td style={tdStyle()}>
+                  {r.action || <span style={{ color: THEME.textMuted }}>- belum diisi -</span>}
+                </td>
+                <td style={tdStyle()}>Rp {Number(r.cost || 0).toLocaleString("id-ID")}</td>
+                <td style={tdStyle()}>
+                  <button style={btn()} onClick={() => open(r)} disabled={loading}>
+                    {r.finalized ? "Lihat" : "Finalisasi"}
+                  </button>
+                </td>
               </tr>
             ))}
+
             {!repairs.length && (
-              <tr><td colSpan="6" style={{ color: "#666" }}>
-                Belum ada repair. Buat dari Follow-up status DONE lalu klik Generate Repair.
-              </td></tr>
+              <tr>
+                <td colSpan="6" style={{ ...tdStyle(), textAlign: "center", color: THEME.textMuted }}>
+                  Belum ada data repair.
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
       </div>
 
       {selected && (
-        <div style={{ ...card(), marginTop: 14 }}>
-          <h3 style={{ marginTop: 0 }}>
+        <div style={{ ...card(), marginTop: 20 }}>
+          <h3 style={{ marginTop: 0, color: THEME.textTitle }}>
             {selected.vehiclePlate} — {selected.finalized ? "Detail Repair" : "Finalisasi Repair"}
           </h3>
 
-          {msg && <div style={{ marginBottom: 10, color: "#b00020" }}>{msg}</div>}
-
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <select value={technician} onChange={(e) => setTechnician(e.target.value)} style={inp()} disabled={selected.finalized}>
-              <option value="">Pilih teknisi (opsional)</option>
-              {technicians.map(t => <option key={t.id} value={t.username}>{t.username}</option>)}
+            {/* ✅ Pilih Teknisi pakai ID */}
+            <select
+              value={technicianId}
+              onChange={(e) => setTechnicianId(e.target.value)}
+              style={inp()}
+              disabled={selected.finalized || loading}
+            >
+              <option value="">Pilih teknisi</option>
+              {technicians.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.username} (id:{t.id})
+                </option>
+              ))}
             </select>
 
             <input
@@ -141,7 +239,7 @@ export default function Repairs() {
               type="number"
               placeholder="Biaya (akan masuk Finance)"
               style={inp()}
-              disabled={selected.finalized}
+              disabled={selected.finalized || loading}
             />
 
             <input
@@ -149,51 +247,61 @@ export default function Repairs() {
               onChange={(e) => setAction(e.target.value)}
               placeholder="Tindakan / perbaikan"
               style={{ ...inp(), gridColumn: "1 / -1" }}
-              disabled={selected.finalized}
+              disabled={selected.finalized || loading}
             />
           </div>
 
-          <div style={{ marginTop: 12, padding: 10, borderRadius: 12, border: "1px solid #eee", background: "#fafafa" }}>
-            <div style={{ fontWeight: 800, marginBottom: 8 }}>Sparepart digunakan</div>
+          <div style={partsBox()}>
+            <div style={{ fontWeight: 800, marginBottom: 8, color: THEME.textTitle }}>
+              Sparepart digunakan
+            </div>
 
             {!selected.finalized && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px", gap: 8 }}>
-                <select value={partId} onChange={(e) => setPartId(e.target.value)} style={inp()}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px", gap: 8, marginBottom: 10 }}>
+                <select value={partId} onChange={(e) => setPartId(e.target.value)} style={inp()} disabled={loading}>
                   <option value="">Pilih sparepart</option>
-                  {parts.map(p => <option key={p.id} value={p.id}>{p.sku} — {p.name} (stok:{p.stock})</option>)}
+                  {parts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.sku} — {p.name} (stok:{p.stock})
+                    </option>
+                  ))}
                 </select>
-                <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={inp()} />
-                <button type="button" onClick={addPart} style={btn()}>Tambah</button>
+                <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={inp()} disabled={loading} />
+                <button type="button" onClick={addPart} style={btnPrimary()} disabled={loading}>
+                  Tambah
+                </button>
               </div>
             )}
 
-            <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-              {partsUsed.map(x => {
+            <div style={{ display: "grid", gap: 6 }}>
+              {partsUsed.map((x) => {
                 const p = resolvePart(x.partId);
                 return (
-                  <div key={x.partId} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div>{p?.name || "-"} — qty: <b>{x.qty}</b></div>
+                  <div key={x.partId} style={partItem()}>
+                    <div style={{ color: THEME.textBody }}>
+                      {p?.name || "-"} — qty: <b style={{ color: THEME.textStrong }}>{x.qty}</b>
+                    </div>
                     {!selected.finalized && (
-                      <button type="button" onClick={() => removePart(x.partId)} style={btnDanger()}>hapus</button>
+                      <button type="button" onClick={() => removePart(x.partId)} style={btnDanger()} disabled={loading}>
+                        hapus
+                      </button>
                     )}
                   </div>
                 );
               })}
-              {!partsUsed.length && <div style={{ color: "#666" }}>Belum ada sparepart.</div>}
+              {!partsUsed.length && <div style={{ color: THEME.textMuted }}>Belum ada sparepart.</div>}
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+          <div style={{ display: "flex", gap: 10, marginTop: 15 }}>
             {!selected.finalized && (
-              <button style={btnPrimary()} onClick={onFinalize}>
-                Finalisasi (stok & finance otomatis)
+              <button style={btnPrimary()} onClick={onFinalize} disabled={loading}>
+                {loading ? "Memproses..." : "Finalisasi"}
               </button>
             )}
-            <button style={btn()} onClick={() => setSelectedId("")}>Tutup</button>
-          </div>
-
-          <div style={{ marginTop: 10, color: "#666", fontSize: 13 }}>
-            Finalisasi akan: kurangi stok sparepart + catat expense ke Finance.
+            <button style={btn()} onClick={() => setSelectedId(null)} disabled={loading}>
+              Tutup
+            </button>
           </div>
         </div>
       )}
@@ -201,49 +309,110 @@ export default function Repairs() {
   );
 }
 
-const card = () => ({ 
-  background: "#fff", 
-  padding: "20px", 
-  borderRadius: "16px", 
-  boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)" 
+const THEME = {
+  primary: "#0ea5e9",
+  softBg: "#f0f9ff",
+  border: "#bae6fd",
+  borderSoft: "#e2e8f0",
+  textTitle: "#0369a1",
+  textStrong: "#0f172a",
+  textBody: "#334155",
+  textMuted: "#64748b",
+  danger: "#e11d48",
+};
+
+const card = () => ({
+  background: "#ffffff",
+  padding: 20,
+  borderRadius: 16,
+  border: `1px solid ${THEME.border}`,
+  boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)",
 });
 
-const inp = () => ({ 
-  padding: "10px 14px", 
-  borderRadius: "10px", 
-  border: "1px solid #e0f2fe", 
+const inp = () => ({
+  padding: "10px 14px",
+  borderRadius: "10px",
+  border: `1px solid ${THEME.borderSoft}`,
   background: "#f8fafc",
-  outline: "none"
+  outline: "none",
 });
 
-const btn = () => ({ 
-  paddingitg: "8px 14px", 
-  borderRadius: "10px", 
-  border: "1px solid #bae6fd", 
-  background: "#f0f9ff", 
-  color: "#0369a1", 
-  fontWeight: "600",
-  cursor: "pointer"
-});
-
-const btnPrimary = () => ({ 
-  padding: "10px 16px", 
-  borderRadius: "10px", 
-  border: "none", 
-  background: "#0ea5e9", 
-  color: "#fff", 
-  fontWeight: "600",
+const btn = () => ({
+  padding: "8px 16px",
+  borderRadius: "10px",
+  border: `1px solid ${THEME.border}`,
+  background: THEME.softBg,
+  color: THEME.textTitle,
+  fontWeight: "700",
   cursor: "pointer",
-  boxShadow: "0 2px 4px rgba(14, 165, 233, 0.3)"
 });
 
-const btnDanger = () => ({ 
-  padding: "6px 12px", 
-  borderRadius: "8px", 
-  border: "1px solid #fecaca", 
-  background: "#fff1f2", 
-  color: "#e11d48", 
+const btnPrimary = () => ({
+  padding: "10px 20px",
+  borderRadius: "10px",
+  border: "none",
+  background: THEME.primary,
+  color: "#ffffff",
+  fontWeight: "700",
+  cursor: "pointer",
+});
+
+const btnDanger = () => ({
+  padding: "6px 12px",
+  borderRadius: "8px",
+  border: `1px solid ${THEME.danger}33`,
+  background: "#fff1f2",
+  color: THEME.danger,
+  fontWeight: "700",
+  cursor: "pointer",
   fontSize: "12px",
-  fontWeight: "600",
-  cursor: "pointer" 
+});
+
+const tableStyle = () => ({
+  width: "100%",
+  borderCollapse: "collapse",
+  border: `1px solid ${THEME.borderSoft}`,
+});
+
+const thStyle = () => ({
+  background: "#f8fafc",
+  padding: "12px",
+  border: `1px solid ${THEME.borderSoft}`,
+  textAlign: "left",
+  color: THEME.textTitle,
+  fontSize: "14px",
+});
+
+const tdStyle = () => ({
+  padding: "12px",
+  border: `1px solid ${THEME.borderSoft}`,
+  fontSize: "14px",
+  color: THEME.textBody,
+});
+
+const partsBox = () => ({
+  marginTop: 15,
+  padding: 15,
+  borderRadius: 12,
+  background: "#f8fafc",
+  border: `1px solid ${THEME.borderSoft}`,
+});
+
+const partItem = () => ({
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  padding: "8px 12px",
+  background: "#fff",
+  border: `1px solid ${THEME.borderSoft}`,
+  borderRadius: "8px",
+});
+
+const statusPill = (finalized) => ({
+  padding: "4px 10px",
+  borderRadius: 999,
+  background: finalized ? "#dcfce7" : "#fef3c7",
+  color: finalized ? "#15803d" : "#b45309",
+  fontSize: "12px",
+  fontWeight: "800",
 });

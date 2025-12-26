@@ -1,120 +1,55 @@
-import { loadDb, saveDb, uid } from "./fakeDb";
-import { stockMove } from "./inventoryService";
-import { createTransaction } from "./financeService";
+import { api } from "./api";
 
-/**
- * LIST REPAIRS
- * hanya tampilkan data, tidak ada side-effect
- */
-export function listRepairs({ search = "" } = {}) {
-  const db = loadDb();
-  const q = String(search || "").trim().toLowerCase();
+// unwrap helpers
+function unwrapList(resData) {
+  if (Array.isArray(resData)) return resData;
+  if (Array.isArray(resData?.data)) return resData.data;
+  if (Array.isArray(resData?.data?.data)) return resData.data.data;
+  return [];
+}
 
-  return db.repairs.filter(r =>
-    !q ||
-    (r.vehiclePlate || "").toLowerCase().includes(q) ||
-    (r.technician || "").toLowerCase().includes(q) ||
-    (r.action || "").toLowerCase().includes(q)
-  );
+function unwrapItem(resData) {
+  return resData?.data ?? resData;
+}
+
+export async function listRepairs({ search = "" } = {}) {
+  const qs = search ? `?search=${encodeURIComponent(search)}` : "";
+  const res = await api.get(`/admin/repairs${qs}`);
+  return unwrapList(res.data);
+}
+
+export async function getRepair(id) {
+  if (!id) throw new Error("ID repair kosong.");
+  const res = await api.get(`/admin/repairs/${id}`);
+  return unwrapItem(res.data);
 }
 
 /**
- * ❌ CREATE MANUAL REPAIR DIHAPUS LOGIKANYA
- * Admin TIDAK BOLEH create repair langsung
- * Repair HARUS dari follow-up
+ * FINALIZE repair
+ * POST /api/admin/repairs/{id}/finalize
+ * Payload backend:
+ * {
+ *   technician_id: number,
+ *   action: string,
+ *   cost: number|null,
+ *   parts_used: [{ part_id:number, qty:number }]
+ * }
  */
-export function createRepair() {
-  throw new Error("Repair harus dibuat dari Follow-up yang sudah DONE.");
-}
+export async function finalizeRepair({ id, technicianId, action, cost = 0, partsUsed = [] } = {}) {
+  if (!id) throw new Error("ID repair kosong.");
+  if (!technicianId) throw new Error("Teknisi wajib dipilih.");
+  if (!action || !String(action).trim()) throw new Error("Tindakan wajib diisi.");
 
-/**
- * ✅ GENERATE DRAFT REPAIR DARI FOLLOW-UP
- * belum ada stok keluar, belum ada expense
- */
-export function generateRepairFromFollowup(followupId) {
-  const db = loadDb();
-
-  const f = db.followups.find(x => x.id === followupId);
-  if (!f) throw new Error("Follow-up tidak ditemukan.");
-  if (f.status !== "DONE") {
-    throw new Error("Repair hanya bisa dibuat dari follow-up berstatus DONE.");
-  }
-
-  const exists = db.repairs.some(r => r.followupId === followupId);
-  if (exists) throw new Error("Repair untuk follow-up ini sudah dibuat.");
-
-  const repair = {
-    id: uid("r"),
-    followupId: f.id,
-    vehiclePlate: f.vehiclePlate,
-    technician: "",
-    action: "",
-    cost: 0,
-    date: new Date().toISOString().slice(0, 10),
-    partsUsed: [],
-    finalized: false,
+  const payload = {
+    technician_id: Number(technicianId),           //  backend: technician_id
+    action: String(action).trim(),                 //  backend: action
+    cost: Number(cost || 0),                       //  backend: cost
+    parts_used: (Array.isArray(partsUsed) ? partsUsed : []).map((x) => ({
+      part_id: Number(x.partId),                   //  backend: part_id
+      qty: Number(x.qty),                          //  backend: qty
+    })),
   };
 
-  db.repairs.unshift(repair);
-  saveDb(db);
-  return repair;
-}
-
-/**
- * ✅ FINALISASI REPAIR
- * SATU-SATUNYA TEMPAT:
- * - stok OUT
- * - transaksi expense
- */
-export function finalizeRepair({ id, technician, action, cost, partsUsed }) {
-  const db = loadDb();
-  const r = db.repairs.find(x => x.id === id);
-
-  if (!r) throw new Error("Repair tidak ditemukan.");
-  if (r.finalized) throw new Error("Repair sudah final.");
-  if (!r.followupId) throw new Error("Repair tidak valid (bukan dari follow-up).");
-
-  if (!action || !action.trim()) {
-    throw new Error("Tindakan wajib diisi.");
-  }
-
-  const numCost = Number(cost || 0);
-
-  const used = (partsUsed || [])
-    .filter(x => x.partId && Number(x.qty) > 0)
-    .map(x => ({ partId: x.partId, qty: Number(x.qty) }));
-
-  // update repair
-  r.technician = (technician || "").trim();
-  r.action = action.trim();
-  r.cost = numCost;
-  r.partsUsed = used;
-  r.finalized = true;
-
-  saveDb(db);
-
-  // 🔥 STOK KELUAR (HANYA DI SINI)
-  used.forEach(u => {
-    stockMove({
-      partId: u.partId,
-      type: "OUT",
-      qty: u.qty,
-      note: `Dipakai oleh ${r.technician || "teknisi"} untuk repair ${r.vehiclePlate}`,
-      ref: r.id,
-      date: r.date,
-    });
-  });
-
-  // 🔥 EXPENSE (HANYA DI SINI)
-  if (numCost > 0) {
-    createTransaction({
-      type: "expense",
-      category: "Repair",
-      amount: numCost,
-      date: r.date,
-      note: `Repair ${r.vehiclePlate}: ${r.action}`,
-    });
-  }
-
-  return r;
+  const res = await api.post(`/admin/repairs/${id}/finalize`, payload);
+  return res.data;
 }
