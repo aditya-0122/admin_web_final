@@ -10,7 +10,7 @@ export const socket = io(
 
 socket.on("connect", () => {
   console.log("🟢 Connected to realtime server:", socket.id);
-  socket.emit("join", "admin"); // channel admin
+  socket.emit("join", "admin"); 
 });
 
 socket.on("disconnect", () => {
