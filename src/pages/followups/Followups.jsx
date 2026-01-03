@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { socket } from "../../lib/socket";
 import {
   listFollowupReports,
@@ -9,7 +9,10 @@ import {
 export default function Followups() {
   const [rows, setRows] = useState([]);
   const [selected, setSelected] = useState(null);
+
+  // ✅ ADMIN NOTE DIPISAH (tidak ambil / tidak nimpa note teknisi)
   const [adminNote, setAdminNote] = useState("");
+
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -40,9 +43,21 @@ export default function Followups() {
     return "#b00020";
   };
 
-  const lastResponse = (report) => {
+  // ✅ AMBIL RESPON TEKNISI (HISTORY)
+  const getResponses = (report) => {
     const arr = report?.technicianResponses || report?.technician_responses || [];
-    if (!Array.isArray(arr) || arr.length === 0) return null;
+    if (!Array.isArray(arr)) return [];
+    // urut by created_at / updated_at biar historical enak dibaca
+    return [...arr].sort((a, b) => {
+      const ta = new Date(a?.created_at || a?.updated_at || 0).getTime();
+      const tb = new Date(b?.created_at || b?.updated_at || 0).getTime();
+      return ta - tb;
+    });
+  };
+
+  const lastResponse = (report) => {
+    const arr = getResponses(report);
+    if (!arr.length) return null;
     return arr[arr.length - 1];
   };
 
@@ -79,6 +94,13 @@ export default function Followups() {
     try {
       const full = await getDamageReport(id);
       setSelected(full);
+      // ✅ admin note tetap dipisah (kalau backend sudah simpan admin_note, ambil itu)
+      const existingAdmin =
+        full?.admin_note ??
+        full?.followup_admin_note ??
+        full?.adminNote ??
+        "";
+      setAdminNote(existingAdmin || "");
     } catch {
       // silent
     }
@@ -103,13 +125,11 @@ export default function Followups() {
       }
     };
 
-    // event yang berkaitan dengan flow followup
     socket.on("technician_response.created", refresh);
     socket.on("technician_response.updated", refresh);
     socket.on("damage_report.followup_created", refresh);
     socket.on("damage_report.followup_approved", refresh);
 
-    // fallback event umum
     socket.on("dashboard.refresh", refresh);
 
     return () => {
@@ -125,14 +145,22 @@ export default function Followups() {
   const open = async (r) => {
     setMsg("");
     setSelected(null);
+
+    // ✅ JANGAN SET ADMIN NOTE DARI NOTE TEKNISI (biar tidak nimpa)
     setAdminNote("");
+
     setLoading(true);
     try {
       const full = await getDamageReport(r.id);
       setSelected(full);
 
-      const last = lastResponse(full);
-      setAdminNote(last?.note || "");
+      // ✅ kalau backend punya field admin_note tersimpan, tampilkan di textarea admin
+      const existingAdmin =
+        full?.admin_note ??
+        full?.followup_admin_note ??
+        full?.adminNote ??
+        "";
+      setAdminNote(existingAdmin || "");
     } catch (e) {
       setMsg(`❌ ${e.message || "Gagal ambil detail."}`);
     } finally {
@@ -145,6 +173,8 @@ export default function Followups() {
     setMsg("");
     setLoading(true);
     try {
+      // ✅ KIRIM ADMIN NOTE TERPISAH
+      // (catatan teknisi tetap aman di technician_responses)
       await completeDamageReport({
         id: selected.id,
         admin_note: adminNote,
@@ -159,6 +189,12 @@ export default function Followups() {
       setLoading(false);
     }
   };
+
+  // history responses untuk panel detail
+  const selectedResponses = useMemo(() => {
+    if (!selected) return [];
+    return getResponses(selected);
+  }, [selected]);
 
   return (
     <div>
@@ -209,7 +245,9 @@ export default function Followups() {
               const st = lr?.status || "butuh_followup_admin";
               return (
                 <tr key={r.id} style={{ borderBottom: "1px solid #eee" }}>
-                  <td><b>{vehicleLabel(r)}</b></td>
+                  <td>
+                    <b>{vehicleLabel(r)}</b>
+                  </td>
                   <td>{driverLabel(r)}</td>
                   <td>
                     <span
@@ -256,9 +294,15 @@ export default function Followups() {
             const st = lr?.status || "-";
             return (
               <div style={{ color: "#64748b", marginBottom: 10, lineHeight: 1.6 }}>
-                <div><b>ID:</b> {selected.id}</div>
-                <div><b>Created:</b> {fmt(selected.created_at)}</div>
-                <div><b>Teknisi terakhir:</b> {techLabel(lr)}</div>
+                <div>
+                  <b>ID:</b> {selected.id}
+                </div>
+                <div>
+                  <b>Created:</b> {fmt(selected.created_at)}
+                </div>
+                <div>
+                  <b>Teknisi terakhir:</b> {techLabel(lr)}
+                </div>
                 <div>
                   <b>Status teknisi terakhir:</b>{" "}
                   <span style={{ color: statusColor(st), fontWeight: 900 }}>
@@ -269,15 +313,87 @@ export default function Followups() {
             );
           })()}
 
-          <label>
-            Catatan Admin (opsional)
-            <textarea
-              value={adminNote}
-              onChange={(e) => setAdminNote(e.target.value)}
-              style={{ ...inp(), width: "100%", height: 90, marginTop: 6 }}
-              disabled={loading}
-            />
-          </label>
+          {/* ✅ HISTORY CATATAN TEKNISI (HISTORICAL) */}
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>
+              Riwayat Catatan Teknisi
+            </div>
+
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 12,
+                padding: 10,
+                background: "#fafafa",
+                maxHeight: 260,
+                overflowY: "auto",
+              }}
+            >
+              {selectedResponses.length ? (
+                selectedResponses.map((resp, idx) => {
+                  const st = resp?.status || "-";
+                  const noteText = (resp?.note ?? "").toString().trim();
+                  const when = resp?.created_at || resp?.updated_at || null;
+
+                  return (
+                    <div
+                      key={resp?.id ?? idx}
+                      style={{
+                        padding: "10px 10px",
+                        borderRadius: 12,
+                        background: "#fff",
+                        border: "1px solid #eee",
+                        marginBottom: 10,
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                        <b style={{ color: "#0f172a" }}>{techLabel(resp)}</b>
+                        <span style={{ color: "#64748b", fontSize: 12 }}>
+                          {fmt(when)}
+                        </span>
+                        <span
+                          style={{
+                            marginLeft: "auto",
+                            padding: "3px 10px",
+                            borderRadius: 999,
+                            background: `${statusColor(st)}22`,
+                            color: statusColor(st),
+                            fontWeight: 800,
+                            fontSize: 12,
+                          }}
+                        >
+                          {statusLabel(st)}
+                        </span>
+                      </div>
+
+                      <div style={{ marginTop: 8, color: "#334155", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                        {noteText ? noteText : <span style={{ color: "#94a3b8" }}>— (tanpa catatan) —</span>}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div style={{ color: "#64748b" }}>Belum ada respon teknisi.</div>
+              )}
+            </div>
+          </div>
+
+          {/* ✅ CATATAN ADMIN DIPISAH (tidak menyentuh catatan teknisi) */}
+          <div style={{ marginTop: 12 }}>
+            <label style={{ fontWeight: 800 }}>
+              Catatan Admin (opsional)
+              <textarea
+                value={adminNote}
+                onChange={(e) => setAdminNote(e.target.value)}
+                style={{ ...inp(), width: "100%", height: 90, marginTop: 6 }}
+                disabled={loading}
+                placeholder="Tulis catatan khusus admin di sini (tidak akan mengganti catatan teknisi)."
+              />
+            </label>
+            <div style={{ marginTop: 6, color: "#64748b", fontSize: 12 }}>
+              Catatan admin ini akan disimpan terpisah (admin_note), jadi catatan teknisi tetap utuh & historinya tetap terlihat.
+            </div>
+          </div>
 
           <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
             <button style={btnPrimary()} onClick={complete} disabled={loading}>
