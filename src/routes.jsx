@@ -10,6 +10,9 @@ import Inventory from "./pages/inventory/Inventory";
 import Repairs from "./pages/repairs/Repairs";
 import UsersList from "./pages/users/UsersList";
 import VehiclesList from "./pages/vehicles/VehiclesList";
+import BookingsApproval from "./pages/bookings/BookingsApproval";
+import CostEstimatesApproval from "./pages/costEstimates/CostEstimatesApproval";
+
 import { isLoggedIn } from "./services/authService";
 
 function Protected({ children }) {
@@ -34,6 +37,11 @@ export default function AppRoutes() {
         <Route path="vehicles" element={<VehiclesList />} />
         <Route path="assignments" element={<Assignments />} />
         <Route path="followups" element={<Followups />} />
+
+        {/* approvals */}
+        <Route path="bookings" element={<BookingsApproval />} />
+        <Route path="cost-estimates" element={<CostEstimatesApproval />} />
+
         <Route path="repairs" element={<Repairs />} />
         <Route path="inventory" element={<Inventory />} />
         <Route path="finance" element={<Finance />} />
