@@ -6,41 +6,42 @@ import {
   updateVehicle,
 } from "../../services/vehiclesService";
 
+// REALTIME SOCKET (TAMBAHAN)
+import { socket } from "../../lib/socket";
+
 export default function VehiclesList() {
-  // ===== FORM STATE =====
   const [brand, setBrand] = useState("");
   const [model, setModel] = useState("");
   const [plateNumber, setPlateNumber] = useState("");
   const [year, setYear] = useState("");
 
-  // ===== SEARCH + DEBOUNCE =====
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 250);
 
-  // ===== REFRESH KEY =====
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // ===== SORT =====
-  const [sort, setSort] = useState({ key: "brand", dir: "asc" }); // brand|plate_number|model|year
+  // default: urut berdasarkan brand biar rapih
+  // NOTE: kamu masih bisa klik header untuk sort lain
+  const [sort, setSort] = useState({ key: "brand", dir: "asc" });
 
-  // ===== TOAST =====
   const [toast, setToast] = useState(null);
-
-  // ===== DELETE MODAL =====
   const [deleteTarget, setDeleteTarget] = useState(null);
 
-  // ===== INLINE EDIT =====
   const [editingId, setEditingId] = useState(null);
   const [editBrand, setEditBrand] = useState("");
   const [editModel, setEditModel] = useState("");
   const [editPlateNumber, setEditPlateNumber] = useState("");
   const [editYear, setEditYear] = useState("");
 
-  // ===== DATA STATE (ASYNC) =====
   const [vehiclesRaw, setVehiclesRaw] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // ===== HELPERS =====
+  // ==========================
+  //  PAGINATION
+  // ==========================
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 5;
+
   const refresh = () => setRefreshKey((x) => x + 1);
   const showToast = (type, msg) => setToast({ type, msg });
 
@@ -51,16 +52,11 @@ export default function VehiclesList() {
     return n;
   };
 
-  /* =========================
-     PLATE VALIDATION (WAJIB "B 1239 ODF")
-  ========================= */
   const isValidPlateFormat = (s) => {
     const plate = normalizePlateFinal(s);
-    // [Huruf 1-2] spasi [Angka 1-4] spasi [Huruf 1-3]
     return /^[A-Z]{1,2}\s\d{1,4}\s[A-Z]{1,3}$/.test(plate);
   };
 
-  // brand wajib minimal 2 char, plate wajib format dengan spasi
   const validateForm = (b, p) => {
     const brandOk = (b ?? "").trim().length >= 2;
     const plateOk = isValidPlateFormat(p);
@@ -69,7 +65,7 @@ export default function VehiclesList() {
 
   const canSubmit = validateForm(brand, plateNumber);
 
-  // ===== FETCH VEHICLES (ASYNC) =====
+  // ===== FETCH VEHICLES =====
   useEffect(() => {
     let alive = true;
 
@@ -91,9 +87,29 @@ export default function VehiclesList() {
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
-  // ===== FILTER (CLIENT-SIDE SEARCH) =====
+  // REALTIME: refresh kalau ada perubahan kendaraan
+  useEffect(() => {
+    socket.emit("join", "admin");
+
+    const onRealtime = () => refresh();
+
+    socket.on("vehicle.created", onRealtime);
+    socket.on("vehicle.updated", onRealtime);
+    socket.on("vehicle.deleted", onRealtime);
+
+    socket.on("dashboard.refresh", onRealtime);
+
+    return () => {
+      socket.off("vehicle.created", onRealtime);
+      socket.off("vehicle.updated", onRealtime);
+      socket.off("vehicle.deleted", onRealtime);
+      socket.off("dashboard.refresh", onRealtime);
+    };
+  }, []);
+
   const filtered = useMemo(() => {
     const q = (debouncedSearch || "").trim().toLowerCase();
     if (!q) return vehiclesRaw;
@@ -103,29 +119,72 @@ export default function VehiclesList() {
       const model = (v.model || "").toLowerCase();
       const plate = (v.plate_number || "").toLowerCase();
       const year = v.year != null ? String(v.year) : "";
-      return (
-        brand.includes(q) || model.includes(q) || plate.includes(q) || year.includes(q)
-      );
+      return brand.includes(q) || model.includes(q) || plate.includes(q) || year.includes(q);
     });
   }, [vehiclesRaw, debouncedSearch]);
 
-  // ===== SORTED VEHICLES =====
+  // ==========================
+  // SORTING: urut brand dulu biar rapih
+  // - brand jadi primary sort
+  // - kalau brand sama, urut model
+  // - kalau masih sama, urut plate
+  // - tetap bisa toggle sort lewat header, tapi brand tetap dipakai sebagai tie-breaker
+  // ==========================
   const vehicles = useMemo(() => {
     const arr = [...filtered];
     const { key, dir } = sort;
 
+    const norm = (v) => (v ?? "").toString().toLowerCase().trim();
+
     arr.sort((a, b) => {
-      const va = (a[key] ?? "").toString().toLowerCase();
-      const vb = (b[key] ?? "").toString().toLowerCase();
+      const va = norm(a[key]);
+      const vb = norm(b[key]);
+
       if (va < vb) return dir === "asc" ? -1 : 1;
       if (va > vb) return dir === "asc" ? 1 : -1;
+
+      // tie-breaker: brand -> model -> plate_number
+      const ba = norm(a.brand);
+      const bb = norm(b.brand);
+      if (ba < bb) return -1;
+      if (ba > bb) return 1;
+
+      const ma = norm(a.model);
+      const mb = norm(b.model);
+      if (ma < mb) return -1;
+      if (ma > mb) return 1;
+
+      const pa = norm(a.plate_number);
+      const pb = norm(b.plate_number);
+      if (pa < pb) return -1;
+      if (pa > pb) return 1;
+
       return 0;
     });
 
     return arr;
   }, [filtered, sort]);
 
-  // ===== ADD =====
+  // ==========================
+  // PAGINATION COMPUTED
+  // ==========================
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(vehicles.length / PAGE_SIZE)), [vehicles.length]);
+
+  const pageVehicles = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return vehicles.slice(start, start + PAGE_SIZE);
+  }, [vehicles, page]);
+
+  // reset page jika search/sort berubah biar gak nyangkut di page akhir
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch, sort.key, sort.dir, vehiclesRaw.length]);
+
+  // pastikan page valid kalau totalPages mengecil
+  useEffect(() => {
+    setPage((p) => Math.min(p, totalPages));
+  }, [totalPages]);
+
   const onAdd = async (e) => {
     e.preventDefault();
 
@@ -154,7 +213,6 @@ export default function VehiclesList() {
     }
   };
 
-  // ===== DELETE =====
   const requestDelete = (v) => setDeleteTarget(v);
 
   const confirmDelete = async () => {
@@ -169,7 +227,6 @@ export default function VehiclesList() {
     }
   };
 
-  // ===== EDIT =====
   const startEdit = (v) => {
     setEditingId(v.id);
     setEditBrand(v.brand || "");
@@ -209,7 +266,6 @@ export default function VehiclesList() {
     }
   };
 
-  // ===== SORT TOGGLE =====
   const toggleSort = (key) => {
     setSort((prev) => {
       if (prev.key !== key) return { key, dir: "asc" };
@@ -275,20 +331,13 @@ export default function VehiclesList() {
           </form>
 
           <p style={{ marginTop: 10, color: THEME.textMuted, fontSize: 13 }}>
-            Plate number wajib unik. Kalau sama, backend bakal nolak (tegas tapi adil).
+            Plate number wajib unik.
           </p>
         </div>
 
         {/* RIGHT: LIST */}
         <div style={card()}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 10,
-            }}
-          >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
             <h3 style={{ marginTop: 0, color: THEME.textTitle }}>Daftar Kendaraan</h3>
             <div style={{ color: THEME.textMuted, fontSize: 13 }}>
               Total: <b style={{ color: THEME.textStrong }}>{vehicles.length}</b>
@@ -303,149 +352,191 @@ export default function VehiclesList() {
             disabled={loading}
           />
 
-          <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: THEME.tableHeadBg, color: THEME.textTitle }}>
-                <th align="left" style={thClickable()} onClick={() => toggleSort("brand")}>
-                  Brand {sortIcon(sort, "brand")}
-                </th>
-                <th align="left" style={thClickable()} onClick={() => toggleSort("model")}>
-                  Model {sortIcon(sort, "model")}
-                </th>
-                <th
-                  align="left"
-                  style={thClickable()}
-                  onClick={() => toggleSort("plate_number")}
+          {/* wrapper biar gak kepanjangan */}
+          <div
+            style={{
+              maxHeight: 360,
+              overflowY: "auto",
+              borderRadius: 12,
+              border: `1px solid ${THEME.borderSoft}`,
+              background: "#fff",
+            }}
+          >
+            <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr
+                  style={{
+                    background: THEME.tableHeadBg,
+                    color: THEME.textTitle,
+                    position: "sticky",
+                    top: 0,
+                    zIndex: 2,
+                  }}
                 >
-                  Plate {sortIcon(sort, "plate_number")}
-                </th>
-                <th align="left" style={thClickable()} onClick={() => toggleSort("year")}>
-                  Year {sortIcon(sort, "year")}
-                </th>
-                <th align="left">Aksi</th>
-              </tr>
-            </thead>
+                  <th align="left" style={thClickable()} onClick={() => toggleSort("brand")}>
+                    Brand {sortIcon(sort, "brand")}
+                  </th>
+                  <th align="left" style={thClickable()} onClick={() => toggleSort("model")}>
+                    Model {sortIcon(sort, "model")}
+                  </th>
+                  <th align="left" style={thClickable()} onClick={() => toggleSort("plate_number")}>
+                    Plate {sortIcon(sort, "plate_number")}
+                  </th>
+                  <th align="left" style={thClickable()} onClick={() => toggleSort("year")}>
+                    Year {sortIcon(sort, "year")}
+                  </th>
+                  <th align="left">Aksi</th>
+                </tr>
+              </thead>
 
-            <tbody>
-              {vehicles.map((v) => {
-                const isEditing = editingId === v.id;
+              <tbody>
+                {pageVehicles.map((v) => {
+                  const isEditing = editingId === v.id;
 
-                return (
-                  <tr key={v.id} style={{ borderBottom: `1px solid ${THEME.borderSoft}` }}>
-                    <td style={{ color: THEME.textBody }}>
-                      {isEditing ? (
-                        <input
-                          value={editBrand}
-                          onChange={(e) => setEditBrand(e.target.value)}
-                          style={{ ...inp(), width: "100%" }}
-                          disabled={loading}
-                        />
-                      ) : (
-                        <Highlighted text={v.brand} q={debouncedSearch} />
-                      )}
-                    </td>
-
-                    <td style={{ color: THEME.textBody }}>
-                      {isEditing ? (
-                        <input
-                          value={editModel}
-                          onChange={(e) => setEditModel(e.target.value)}
-                          style={{ ...inp(), width: "100%" }}
-                          disabled={loading}
-                        />
-                      ) : (
-                        <Highlighted text={v.model} q={debouncedSearch} />
-                      )}
-                    </td>
-
-                    <td>
-                      {isEditing ? (
-                        <input
-                          value={editPlateNumber}
-                          onChange={(e) => setEditPlateNumber(normalizePlateTyping(e.target.value))}
-                          onBlur={() =>
-                            setEditPlateNumber(normalizePlateFinal(editPlateNumber))
-                          }
-                          style={{ ...inp(), width: "100%" }}
-                          disabled={loading}
-                        />
-                      ) : (
-                        <b style={{ color: THEME.textStrong }}>
-                          <Highlighted text={v.plate_number} q={debouncedSearch} strong />
-                        </b>
-                      )}
-                    </td>
-
-                    <td style={{ color: THEME.textBody }}>
-                      {isEditing ? (
-                        <input
-                          value={editYear}
-                          onChange={(e) => setEditYear(e.target.value.replace(/[^\d]/g, ""))}
-                          style={{ ...inp(), width: "100%" }}
-                          inputMode="numeric"
-                          disabled={loading}
-                        />
-                      ) : (
-                        <span>{v.year ?? "-"}</span>
-                      )}
-                    </td>
-
-                    <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {isEditing ? (
-                        <>
-                          <button
-                            onClick={() => saveEdit(v.id)}
-                            style={btnPrimary(false)}
-                            type="button"
+                  return (
+                    <tr key={v.id} style={{ borderBottom: `1px solid ${THEME.borderSoft}` }}>
+                      <td style={{ color: THEME.textBody }}>
+                        {isEditing ? (
+                          <input
+                            value={editBrand}
+                            onChange={(e) => setEditBrand(e.target.value)}
+                            style={{ ...inp(), width: "100%" }}
                             disabled={loading}
-                          >
-                            Simpan
-                          </button>
-                          <button
-                            onClick={cancelEdit}
-                            style={btnGhost()}
-                            type="button"
+                          />
+                        ) : (
+                          <Highlighted text={v.brand} q={debouncedSearch} />
+                        )}
+                      </td>
+
+                      <td style={{ color: THEME.textBody }}>
+                        {isEditing ? (
+                          <input
+                            value={editModel}
+                            onChange={(e) => setEditModel(e.target.value)}
+                            style={{ ...inp(), width: "100%" }}
                             disabled={loading}
-                          >
-                            Batal
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => startEdit(v)}
-                            style={btnGhost()}
-                            type="button"
+                          />
+                        ) : (
+                          <Highlighted text={v.model} q={debouncedSearch} />
+                        )}
+                      </td>
+
+                      <td>
+                        {isEditing ? (
+                          <input
+                            value={editPlateNumber}
+                            onChange={(e) => setEditPlateNumber(normalizePlateTyping(e.target.value))}
+                            onBlur={() => setEditPlateNumber(normalizePlateFinal(editPlateNumber))}
+                            style={{ ...inp(), width: "100%" }}
                             disabled={loading}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => requestDelete(v)}
-                            style={btnDanger()}
-                            type="button"
+                          />
+                        ) : (
+                          <b style={{ color: THEME.textStrong }}>
+                            <Highlighted text={v.plate_number} q={debouncedSearch} strong />
+                          </b>
+                        )}
+                      </td>
+
+                      <td style={{ color: THEME.textBody }}>
+                        {isEditing ? (
+                          <input
+                            value={editYear}
+                            onChange={(e) => setEditYear(e.target.value.replace(/[^\d]/g, ""))}
+                            style={{ ...inp(), width: "100%" }}
+                            inputMode="numeric"
                             disabled={loading}
-                          >
-                            Hapus
-                          </button>
-                        </>
-                      )}
+                          />
+                        ) : (
+                          <span>{v.year ?? "-"}</span>
+                        )}
+                      </td>
+
+                      <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {isEditing ? (
+                          <>
+                            <button
+                              onClick={() => saveEdit(v.id)}
+                              style={btnPrimary(false)}
+                              type="button"
+                              disabled={loading}
+                            >
+                              Simpan
+                            </button>
+                            <button onClick={cancelEdit} style={btnGhost()} type="button" disabled={loading}>
+                              Batal
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => startEdit(v)} style={btnGhost()} type="button" disabled={loading}>
+                              Edit
+                            </button>
+                            <button onClick={() => requestDelete(v)} style={btnDanger()} type="button" disabled={loading}>
+                              Hapus
+                            </button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {!vehicles.length && (
+                  <tr>
+                    <td colSpan="5" style={{ color: THEME.textMuted }}>
+                      {loading ? "Memuat data..." : "Belum ada data. Tambahin 1 dulu biar tabelnya punya teman ngobrol."}
                     </td>
                   </tr>
-                );
-              })}
+                )}
+              </tbody>
+            </table>
+          </div>
 
-              {!vehicles.length && (
-                <tr>
-                  <td colSpan="5" style={{ color: THEME.textMuted }}>
-                    {loading
-                      ? "Memuat data..."
-                      : "Belum ada data. Tambahin 1 dulu biar tabelnya punya teman ngobrol."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+          {/* PAGINATION CONTROLS */}
+          {vehicles.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginTop: 10,
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ color: THEME.textMuted, fontWeight: 700, fontSize: 13 }}>
+                Halaman {page} / {totalPages} — Menampilkan {pageVehicles.length} dari {vehicles.length} data
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  style={{
+                    ...btnGhost(),
+                    opacity: page === 1 ? 0.6 : 1,
+                    cursor: page === 1 ? "not-allowed" : "pointer",
+                  }}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  type="button"
+                >
+                  Prev
+                </button>
+
+                <button
+                  style={{
+                    ...btnGhost(),
+                    opacity: page === totalPages ? 0.6 : 1,
+                    cursor: page === totalPages ? "not-allowed" : "pointer",
+                  }}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  type="button"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -455,14 +546,10 @@ export default function VehiclesList() {
         onClose={() => setDeleteTarget(null)}
         footer={
           <>
-            <button
-              style={btnGhost()}
-              onClick={() => setDeleteTarget(null)}
-              disabled={loading}
-            >
+            <button style={btnGhost()} onClick={() => setDeleteTarget(null)} disabled={loading} type="button">
               Batal
             </button>
-            <button style={btnDanger()} onClick={confirmDelete} disabled={loading}>
+            <button style={btnDanger()} onClick={confirmDelete} disabled={loading} type="button">
               Ya, Hapus
             </button>
           </>
@@ -484,9 +571,6 @@ export default function VehiclesList() {
   );
 }
 
-/* =========================
-   HOOK: DEBOUNCE
-========================= */
 function useDebounce(value, delay = 300) {
   const [v, setV] = useState(value);
   useEffect(() => {
@@ -496,26 +580,17 @@ function useDebounce(value, delay = 300) {
   return v;
 }
 
-/* =========================
-   PLATE NORMALIZE
-========================= */
 function normalizePlateTyping(s) {
-  // enak buat input: boleh trailing space, tapi tetap rapi
   return (s || "")
     .toUpperCase()
     .replace(/[^A-Z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
-    .replace(/^\s+/, ""); // hapus spasi di depan saja
+    .replace(/^\s+/, "");
 }
-
 function normalizePlateFinal(s) {
-  // buat simpan: no leading/trailing spaces
   return normalizePlateTyping(s).trim();
 }
 
-/* =========================
-   UI: HIGHLIGHT
-========================= */
 function Highlighted({ text, q, strong }) {
   const t = (text ?? "").toString();
   const query = (q ?? "").trim();
@@ -547,9 +622,6 @@ function Highlighted({ text, q, strong }) {
   );
 }
 
-/* =========================
-   UI: TOAST
-========================= */
 function Toast({ toast, onClose }) {
   useEffect(() => {
     if (!toast) return;
@@ -583,9 +655,6 @@ function Toast({ toast, onClose }) {
   );
 }
 
-/* =========================
-   UI: MODAL
-========================= */
 function Modal({ open, title, children, footer, onClose }) {
   if (!open) return null;
 
@@ -637,17 +706,11 @@ function Modal({ open, title, children, footer, onClose }) {
   );
 }
 
-/* =========================
-   SORT ICON
-========================= */
 function sortIcon(sort, key) {
   if (sort.key !== key) return <span style={{ opacity: 0.35 }}>↕</span>;
   return sort.dir === "asc" ? <span>↑</span> : <span>↓</span>;
 }
 
-/* =========================
-   THEME + STYLES
-========================= */
 const THEME = {
   primary: "#2563eb",
   softBg: "#eff6ff",
