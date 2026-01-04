@@ -8,7 +8,6 @@ import {
   listAssignments,
 } from "../../services/assignmentsService";
 
-
 export default function Assignments() {
   const [vehicleId, setVehicleId] = useState("");
   const [driverId, setDriverId] = useState("");
@@ -18,6 +17,12 @@ export default function Assignments() {
   const [assignments, setAssignments] = useState([]);
   const [drivers, setDrivers] = useState([]);
   const [vehicles, setVehicles] = useState([]);
+
+  // ==========================
+  // ✅ PAGINATION
+  // ==========================
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 5;
 
   const fetchAll = async () => {
     setLoading(true);
@@ -43,26 +48,46 @@ export default function Assignments() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // REALTIME UPDATE
+  // 🔴 REALTIME UPDATE (tanpa reload)
   useEffect(() => {
-    // join channel admin (aman walau dipanggil ulang)
     socket.emit("join", "admin");
 
-    const refresh = () => {
-      fetchAll();
-    };
+    const refresh = () => fetchAll();
 
     socket.on("assignment.created", refresh);
     socket.on("assignment.deleted", refresh);
     socket.on("assignment.updated", refresh);
 
+    socket.on("dashboard.refresh", refresh);
+
     return () => {
       socket.off("assignment.created", refresh);
       socket.off("assignment.deleted", refresh);
       socket.off("assignment.updated", refresh);
+      socket.off("dashboard.refresh", refresh);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // reset page ketika data berubah (biar ga nyangkut di page akhir)
+  useEffect(() => {
+    setPage(1);
+  }, [assignments.length]);
+
+  // computed pagination
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(assignments.length / PAGE_SIZE));
+  }, [assignments.length]);
+
+  const pageAssignments = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return assignments.slice(start, start + PAGE_SIZE);
+  }, [assignments, page]);
+
+  // pastikan page valid kalau totalPages mengecil
+  useEffect(() => {
+    setPage((p) => Math.min(p, totalPages));
+  }, [totalPages]);
 
   const onSave = async (e) => {
     e.preventDefault();
@@ -90,7 +115,6 @@ export default function Assignments() {
     }
   };
 
-  // Render dari backend: assignment punya vehicle & driver (karena with())
   const resolveVehicle = (a) => a?.vehicle?.plate_number || "-";
   const resolveDriver = (a) => a?.driver?.username || "-";
 
@@ -159,43 +183,107 @@ export default function Assignments() {
         <div style={card()}>
           <h3 style={{ marginTop: 0, color: THEME.textTitle }}>Daftar Assignment</h3>
 
-          <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: THEME.tableHeadBg, color: THEME.textTitle }}>
-                <th align="left">Kendaraan</th>
-                <th align="left">Driver</th>
-                <th align="left">Assigned At</th>
-                <th align="left">Aksi</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {assignments.map((a) => (
-                <tr key={a.id} style={{ borderBottom: `1px solid ${THEME.borderSoft}` }}>
-                  <td>
-                    <b style={{ color: THEME.textStrong }}>{resolveVehicle(a)}</b>
-                  </td>
-                  <td style={{ color: THEME.textBody }}>{resolveDriver(a)}</td>
-                  <td style={{ color: THEME.textBody }}>
-                    {a.assigned_at ? new Date(a.assigned_at).toLocaleString() : "-"}
-                  </td>
-                  <td>
-                    <button style={btnDanger()} onClick={() => onDelete(a.id)} disabled={loading}>
-                      Hapus
-                    </button>
-                  </td>
+          {/* WRAPPER biar tabel gak kepanjangan */}
+          <div
+            style={{
+              marginTop: 8,
+              maxHeight: 360,
+              overflowY: "auto",
+              borderRadius: 12,
+              border: `1px solid ${THEME.borderSoft}`,
+              background: "#fff",
+            }}
+          >
+            <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr
+                  style={{
+                    background: THEME.tableHeadBg,
+                    color: THEME.textTitle,
+                    position: "sticky",
+                    top: 0,
+                    zIndex: 2,
+                  }}
+                >
+                  <th align="left">Kendaraan</th>
+                  <th align="left">Driver</th>
+                  <th align="left">Assigned At</th>
+                  <th align="left">Aksi</th>
                 </tr>
-              ))}
+              </thead>
 
-              {!assignments.length && (
-                <tr>
-                  <td colSpan="4" style={{ color: THEME.textMuted }}>
-                    {loading ? "Memuat data..." : "Belum ada assignment."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+              <tbody>
+                {pageAssignments.map((a) => (
+                  <tr key={a.id} style={{ borderBottom: `1px solid ${THEME.borderSoft}` }}>
+                    <td>
+                      <b style={{ color: THEME.textStrong }}>{resolveVehicle(a)}</b>
+                    </td>
+                    <td style={{ color: THEME.textBody }}>{resolveDriver(a)}</td>
+                    <td style={{ color: THEME.textBody }}>
+                      {a.assigned_at ? new Date(a.assigned_at).toLocaleString() : "-"}
+                    </td>
+                    <td>
+                      <button style={btnDanger()} onClick={() => onDelete(a.id)} disabled={loading}>
+                        Hapus
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+
+                {!assignments.length && (
+                  <tr>
+                    <td colSpan="4" style={{ color: THEME.textMuted }}>
+                      {loading ? "Memuat data..." : "Belum ada assignment."}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* PAGINATION */}
+          {assignments.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginTop: 10,
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ color: THEME.textMuted, fontWeight: 700, fontSize: 13 }}>
+                Halaman {page} / {totalPages} — Menampilkan {pageAssignments.length} dari {assignments.length} data
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  style={{
+                    ...btnSecondary(),
+                    opacity: page === 1 ? 0.6 : 1,
+                    cursor: page === 1 ? "not-allowed" : "pointer",
+                  }}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                >
+                  Prev
+                </button>
+
+                <button
+                  style={{
+                    ...btnSecondary(),
+                    opacity: page === totalPages ? 0.6 : 1,
+                    cursor: page === totalPages ? "not-allowed" : "pointer",
+                  }}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -239,6 +327,16 @@ const btnPrimary = () => ({
   border: "none",
   background: THEME.primary,
   color: "#fff",
+  fontWeight: 800,
+  cursor: "pointer",
+});
+
+const btnSecondary = () => ({
+  padding: "6px 10px",
+  borderRadius: 10,
+  border: `1px solid ${THEME.borderSoft}`,
+  background: THEME.softBg,
+  color: THEME.primaryDark,
   fontWeight: 800,
   cursor: "pointer",
 });
