@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   createPart,
   deletePart,
@@ -6,14 +6,11 @@ import {
   listStockMovements,
   stockMove,
   updatePart,
-
-  //  approve/reject permintaan teknisi
   listPartUsages,
   approvePartUsage,
   rejectPartUsage,
 } from "../../services/inventoryService";
 
-// socket client
 import { socket } from "../../lib/socket";
 
 export default function Inventory() {
@@ -25,26 +22,55 @@ export default function Inventory() {
   const [parts, setParts] = useState([]);
   const [moves, setMoves] = useState([]);
 
-  // data part usage request (pending)
+  // ✅ data part usage request (pending)
   const [usageLoading, setUsageLoading] = useState(false);
   const [usages, setUsages] = useState([]);
 
   // create/edit form
   const [name, setName] = useState("");
   const [sku, setSku] = useState("");
-  const [stock, setStock] = useState(0);
-  const [minStock, setMinStock] = useState(0);
-  const [buyPrice, setBuyPrice] = useState(0);
+
+  // ✅ jangan tampil 0 sebelum user isi → pakai string kosong
+  const [stock, setStock] = useState("");      // stok awal saat create
+  const [minStock, setMinStock] = useState(""); // min stok
+  const [buyPrice, setBuyPrice] = useState(""); // harga beli
   const [editingId, setEditingId] = useState(null);
 
+  // edit buffer
+  const [editBrandDummy, setEditBrandDummy] = useState(""); // keep placeholder if needed (not used)
   // stock IN form
   const [partId, setPartId] = useState("");
   const [qty, setQty] = useState(1);
   const [note, setNote] = useState("");
 
-  // note untuk approve / reject
+  // ✅ note untuk approve / reject
   const [approveNote, setApproveNote] = useState("");
   const [rejectReason, setRejectReason] = useState("");
+
+  // ==========================
+  // ✅ PAGINATION SETTINGS
+  // ==========================
+  const PAGE_SIZE_PARTS = 8;
+  const PAGE_SIZE_MOVES = 10;
+  const PAGE_SIZE_USAGES = 8;
+
+  const [pageParts, setPageParts] = useState(1);
+  const [pageMoves, setPageMoves] = useState(1);
+  const [pageUsages, setPageUsages] = useState(1);
+
+  const resetPages = () => {
+    setPageParts(1);
+    setPageMoves(1);
+    setPageUsages(1);
+  };
+
+  const toIntOrNull = (v) => {
+    const s = String(v ?? "").trim();
+    if (s === "") return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  };
 
   const loadAll = async () => {
     setLoading(true);
@@ -54,7 +80,7 @@ export default function Inventory() {
       setParts(Array.isArray(p) ? p : []);
       setMoves(Array.isArray(m) ? m : []);
     } catch (e) {
-      setMsg(`${e.message}`);
+      setMsg(`❌ ${e.message}`);
       setParts([]);
       setMoves([]);
     } finally {
@@ -62,7 +88,6 @@ export default function Inventory() {
     }
   };
 
-  // load request sparepart (pending)
   const loadUsages = async () => {
     setUsageLoading(true);
     setMsg("");
@@ -70,7 +95,7 @@ export default function Inventory() {
       const u = await listPartUsages({ status: "pending", limit: 100 });
       setUsages(Array.isArray(u) ? u : []);
     } catch (e) {
-      setMsg(`${e.message}`);
+      setMsg(`❌ ${e.message}`);
       setUsages([]);
     } finally {
       setUsageLoading(false);
@@ -81,17 +106,19 @@ export default function Inventory() {
   useEffect(() => {
     loadAll();
     loadUsages();
+    resetPages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  // =====================
+  // REALTIME SOCKET
+  // =====================
   useEffect(() => {
-    // connect socket sekali (aman kalau socket.io client auto-connect)
     if (typeof socket?.connect === "function" && !socket.connected) {
       socket.connect();
     }
 
     const joinAdminRoom = () => {
-      // dukung dua bentuk join biar kompatibel
       try {
         socket.emit("join", "admin");
       } catch (_) {}
@@ -106,7 +133,6 @@ export default function Inventory() {
       loadUsages();
     };
 
-    // === handler untuk server yang emit "event" umum ===
     const onGenericEvent = (evt) => {
       const type = evt?.type;
 
@@ -119,24 +145,18 @@ export default function Inventory() {
         refreshAll();
     };
 
-    // connect lifecycle
     socket.on("connect", joinAdminRoom);
-
-    // kalau socket sudah keburu connected sebelum listener kepasang
     if (socket.connected) joinAdminRoom();
 
-    // === event spesifik (recommended) ===
     socket.on("part_usage.requested", refreshUsages);
     socket.on("part_usage.rejected", refreshUsages);
     socket.on("part_usage.approved", refreshAll);
     socket.on("stock_movement.created", refreshAll);
 
-    // optional: kalau server kamu kirim event part CRUD
     socket.on("part.created", refreshAll);
     socket.on("part.updated", refreshAll);
     socket.on("part.deleted", refreshAll);
 
-    // === event generic fallback ===
     socket.on("event", onGenericEvent);
 
     return () => {
@@ -153,14 +173,15 @@ export default function Inventory() {
 
       socket.off("event", onGenericEvent);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const resetForm = () => {
     setName("");
     setSku("");
-    setStock(0);
-    setMinStock(0);
-    setBuyPrice(0);
+    setStock("");     // ✅ reset ke kosong
+    setMinStock("");
+    setBuyPrice("");
     setEditingId(null);
   };
 
@@ -169,27 +190,43 @@ export default function Inventory() {
     setMsg("");
     try {
       if (editingId) {
-        await updatePart(editingId, { name, sku, minStock, buyPrice });
-        setMsg("Sparepart berhasil di-update.");
+        await updatePart(editingId, {
+          name: name.trim(),
+          sku: sku.trim(),
+          minStock: toIntOrNull(minStock) ?? 0,
+          buyPrice: toIntOrNull(buyPrice) ?? 0,
+        });
+        setMsg("✅ Sparepart berhasil di-update.");
       } else {
-        await createPart({ name, sku, stock, minStock, buyPrice });
-        setMsg("Sparepart ditambahkan.");
+        await createPart({
+          name: name.trim(),
+          sku: sku.trim(),
+          stock: toIntOrNull(stock) ?? 0,
+          minStock: toIntOrNull(minStock) ?? 0,
+          buyPrice: toIntOrNull(buyPrice) ?? 0,
+        });
+        setMsg("✅ Sparepart ditambahkan.");
       }
       resetForm();
       await loadAll();
     } catch (e2) {
-      setMsg(`${e2.message}`);
+      setMsg(`❌ ${e2.message}`);
     }
   };
 
   const onEdit = (p) => {
     setMsg("");
     setEditingId(p.id);
+
     setName(p.name || "");
     setSku(p.sku || "");
-    setStock(0);
-    setMinStock(Number(p.min_stock ?? p.minStock ?? 0));
-    setBuyPrice(Number(p.buy_price ?? p.buyPrice ?? 0));
+
+    // ✅ jangan set stok jadi 0 ketika edit → tampilkan stok saat ini (readOnly)
+    setStock(String(p.stock ?? "")); // tampil current stock
+
+    setMinStock(String(Number(p.min_stock ?? p.minStock ?? 0)));
+    setBuyPrice(String(Number(p.buy_price ?? p.buyPrice ?? 0)));
+
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -198,17 +235,18 @@ export default function Inventory() {
     setMsg("");
     try {
       await deletePart(id);
-      setMsg("Sparepart dihapus.");
+      setMsg("✅ Sparepart dihapus.");
       if (editingId === id) resetForm();
       await loadAll();
     } catch (e) {
-      setMsg(`${e.message}`);
+      setMsg(`❌ ${e.message}`);
     }
   };
 
   const onMove = async (e) => {
     e.preventDefault();
     setMsg("");
+
     try {
       await stockMove({
         partId,
@@ -227,7 +265,6 @@ export default function Inventory() {
     }
   };
 
-  //Approve request sparepart (stok OUT harus terjadi di backend)
   const onApproveUsage = async (u) => {
     if (!confirm("Approve permintaan sparepart ini? Stok akan OUT otomatis.")) return;
     setMsg("");
@@ -238,45 +275,112 @@ export default function Inventory() {
         date: null,
       });
       setApproveNote("");
-      setMsg("Permintaan disetujui. Stok OUT diproses.");
+      setMsg("✅ Permintaan disetujui. Stok OUT diproses.");
       await Promise.all([loadAll(), loadUsages()]);
     } catch (e) {
-      setMsg(`${e.message}`);
+      setMsg(`❌ ${e.message}`);
     }
   };
 
-  //Reject request sparepart
   const onRejectUsage = async (u) => {
     if (!confirm("Reject permintaan sparepart ini?")) return;
     setMsg("");
     try {
       await rejectPartUsage(u.id, { reason: rejectReason || null });
       setRejectReason("");
-      setMsg("Permintaan ditolak.");
+      setMsg("✅ Permintaan ditolak.");
       await loadUsages();
     } catch (e) {
-      setMsg(`${e.message}`);
+      setMsg(`❌ ${e.message}`);
     }
   };
 
-  // helper biar tanggalnya aman walau formatnya beda
   const fmtDate = (x) => {
     if (!x) return "-";
     return String(x).slice(0, 10);
   };
 
-  // helper aman baca relasi (u.part, u.damageReport, u.technician dll)
   const uPartName = (u) => u?.part?.name ?? "-";
   const uPartSku = (u) => u?.part?.sku ?? "-";
   const uQty = (u) => u?.qty ?? "-";
   const uTech = (u) => u?.technician?.username ?? u?.user?.username ?? "-";
-  const uReportId = (u) =>
-    u?.damage_report_id ?? u?.damageReport?.id ?? u?.damage_report?.id ?? "-";
+  const uReportId = (u) => u?.damage_report_id ?? u?.damageReport?.id ?? u?.damage_report?.id ?? "-";
   const uPlate = (u) => {
     const dr = u?.damageReport ?? u?.damage_report;
     const v = dr?.vehicle;
     return v?.plate_number ?? "-";
   };
+
+  // ==========================
+  // ✅ SORTING + PAGINATION DATA
+  // ==========================
+  const partsSorted = useMemo(() => {
+    const arr = [...(Array.isArray(parts) ? parts : [])];
+    arr.sort((a, b) => {
+      const sa = `${a?.sku ?? ""}`.toLowerCase();
+      const sb = `${b?.sku ?? ""}`.toLowerCase();
+      if (sa < sb) return -1;
+      if (sa > sb) return 1;
+      const na = `${a?.name ?? ""}`.toLowerCase();
+      const nb = `${b?.name ?? ""}`.toLowerCase();
+      if (na < nb) return -1;
+      if (na > nb) return 1;
+      return 0;
+    });
+    return arr;
+  }, [parts]);
+
+  const movesSorted = useMemo(() => {
+    const arr = [...(Array.isArray(moves) ? moves : [])];
+    // terbaru di atas
+    arr.sort((a, b) => {
+      const ta = new Date(a?.date ?? a?.movement_date ?? a?.created_at ?? 0).getTime();
+      const tb = new Date(b?.date ?? b?.movement_date ?? b?.created_at ?? 0).getTime();
+      return tb - ta;
+    });
+    return arr;
+  }, [moves]);
+
+  const usagesSorted = useMemo(() => {
+    const arr = [...(Array.isArray(usages) ? usages : [])];
+    arr.sort((a, b) => {
+      const ta = new Date(a?.created_at ?? a?.date ?? 0).getTime();
+      const tb = new Date(b?.created_at ?? b?.date ?? 0).getTime();
+      return tb - ta;
+    });
+    return arr;
+  }, [usages]);
+
+  const totalPagesParts = Math.max(1, Math.ceil(partsSorted.length / PAGE_SIZE_PARTS));
+  const totalPagesMoves = Math.max(1, Math.ceil(movesSorted.length / PAGE_SIZE_MOVES));
+  const totalPagesUsages = Math.max(1, Math.ceil(usagesSorted.length / PAGE_SIZE_USAGES));
+
+  useEffect(() => {
+    setPageParts((p) => Math.min(p, totalPagesParts));
+  }, [totalPagesParts]);
+
+  useEffect(() => {
+    setPageMoves((p) => Math.min(p, totalPagesMoves));
+  }, [totalPagesMoves]);
+
+  useEffect(() => {
+    setPageUsages((p) => Math.min(p, totalPagesUsages));
+  }, [totalPagesUsages]);
+
+  const pagePartsData = useMemo(() => {
+    const start = (pageParts - 1) * PAGE_SIZE_PARTS;
+    return partsSorted.slice(start, start + PAGE_SIZE_PARTS);
+  }, [partsSorted, pageParts]);
+
+  const pageMovesData = useMemo(() => {
+    const start = (pageMoves - 1) * PAGE_SIZE_MOVES;
+    return movesSorted.slice(start, start + PAGE_SIZE_MOVES);
+  }, [movesSorted, pageMoves]);
+
+  const pageUsagesData = useMemo(() => {
+    const start = (pageUsages - 1) * PAGE_SIZE_USAGES;
+    return usagesSorted.slice(start, start + PAGE_SIZE_USAGES);
+  }, [usagesSorted, pageUsages]);
 
   return (
     <div>
@@ -287,6 +391,7 @@ export default function Inventory() {
           style={{
             marginBottom: 10,
             color: msg.startsWith("❌") ? "#b00020" : "#1b5e20",
+            fontWeight: 700,
           }}
         >
           {msg}
@@ -294,6 +399,7 @@ export default function Inventory() {
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 16 }}>
+        {/* FORM PART */}
         <div style={card()}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <h3 style={{ marginTop: 0, flex: 1 }}>
@@ -322,55 +428,78 @@ export default function Inventory() {
               required
             />
 
+            {/* ✅ stok awal: saat create boleh isi, saat edit tampil current stock readOnly */}
             <input
               type="number"
               value={stock}
               onChange={(e) => setStock(e.target.value)}
-              placeholder={editingId ? "Stok awal (disable saat edit)" : "Stok awal"}
+              placeholder={editingId ? "Stok saat ini (read-only)" : "Stok awal (opsional)"}
               style={inp()}
-              disabled={!!editingId}
+              readOnly={!!editingId}   // ✅ bukan disabled (biar bisa klik/scroll/select)
             />
 
             <input
               type="number"
               value={minStock}
               onChange={(e) => setMinStock(e.target.value)}
-              placeholder="Min stok"
+              placeholder="Min stok (opsional)"
               style={inp()}
             />
             <input
               type="number"
               value={buyPrice}
               onChange={(e) => setBuyPrice(e.target.value)}
-              placeholder="Harga beli"
+              placeholder="Harga beli (opsional)"
               style={inp()}
             />
 
             <button style={btnPrimary()} disabled={loading}>
               {loading ? "Loading..." : editingId ? "Update" : "Simpan"}
             </button>
+
+            {editingId && (
+              <div style={{ fontSize: 12, color: theme.muted, lineHeight: 1.5 }}>
+                * Stok tidak diedit dari sini. Pakai menu <b>Stok Masuk (Restock)</b> / (OUT via approval pemakaian teknisi).
+              </div>
+            )}
           </form>
         </div>
 
+        {/* STOCK IN */}
         <div style={card()}>
           <h3 style={{ marginTop: 0 }}>Stok Masuk (Restock)</h3>
 
           <form onSubmit={onMove} style={{ display: "grid", gap: 10 }}>
-            <select value={partId} onChange={(e) => setPartId(e.target.value)} style={inp()} required>
-              <option value="">Pilih sparepart</option>
-              {parts.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.sku} — {p.name} (stok: {p.stock})
-                </option>
-              ))}
-            </select>
+            {/* ✅ searchable select */}
+            <SearchableSelect
+              value={partId}
+              onChange={setPartId}
+              options={partsSorted.map((p) => ({
+                value: String(p.id),
+                label: `${p.sku} — ${p.name}`,
+                meta: `(stok: ${p.stock})`,
+              }))}
+              placeholder="Cari sparepart (SKU / nama)..."
+              disabled={loading}
+            />
 
             <select value="IN" style={inp()} disabled>
               <option value="IN">IN (Masuk)</option>
             </select>
 
-            <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={inp()} min={1} />
-            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Catatan (opsional)" style={inp()} />
+            <input
+              type="number"
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+              style={inp()}
+              min={1}
+            />
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Catatan (opsional)"
+              style={inp()}
+            />
             <button style={btnPrimary()} disabled={loading}>
               Proses IN
             </button>
@@ -378,66 +507,95 @@ export default function Inventory() {
         </div>
       </div>
 
-      {/*Approval request sparepart teknisi */}
+      {/* APPROVAL REQUEST TEKNISI */}
       <div style={{ ...card(), marginTop: 16 }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <h3 style={{ margin: 0, flex: 1 }}>Approval Permintaan Sparepart (Teknisi)</h3>
-          <button style={btnSecondary()} onClick={loadUsages} disabled={usageLoading} type="button">
+          <button
+            style={btnSecondary()}
+            onClick={loadUsages}
+            disabled={usageLoading}
+            type="button"
+          >
             {usageLoading ? "Loading..." : "Refresh"}
           </button>
         </div>
 
         <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <input value={approveNote} onChange={(e) => setApproveNote(e.target.value)} placeholder="Catatan approve (opsional)" style={inp()} />
-          <input value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} placeholder="Alasan reject (opsional)" style={inp()} />
+          <input
+            value={approveNote}
+            onChange={(e) => setApproveNote(e.target.value)}
+            placeholder="Catatan approve (opsional)"
+            style={inp()}
+          />
+          <input
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            placeholder="Alasan reject (opsional)"
+            style={inp()}
+          />
         </div>
 
-        <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse", marginTop: 10 }}>
-          <thead>
-            <tr style={{ background: "#f3f4f6" }}>
-              <th align="left">Tanggal</th>
-              <th align="left">Teknisi</th>
-              <th align="left">Laporan</th>
-              <th align="left">Plat</th>
-              <th align="left">Sparepart</th>
-              <th align="left">Qty</th>
-              <th align="left">Status</th>
-              <th align="left">Aksi</th>
-            </tr>
-          </thead>
-          <tbody>
-            {usages.map((u) => (
-              <tr key={u.id} style={{ borderBottom: "1px solid #eee" }}>
-                <td>{fmtDate(u.created_at ?? u.date)}</td>
-                <td>{uTech(u)}</td>
-                <td>#{uReportId(u)}</td>
-                <td>{uPlate(u)}</td>
-                <td>
-                  <b>{uPartSku(u)}</b> — {uPartName(u)}
-                </td>
-                <td>{uQty(u)}</td>
-                <td style={{ color: "#111" }}>{u.status ?? "pending"}</td>
-                <td style={{ display: "flex", gap: 8 }}>
-                  <button style={btnPrimarySmall()} onClick={() => onApproveUsage(u)}>
-                    Approve
-                  </button>
-                  <button style={btnDanger()} onClick={() => onRejectUsage(u)}>
-                    Reject
-                  </button>
-                </td>
+        <DataTableWrapper>
+          <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#f3f4f6" }}>
+                <th align="left">Tanggal</th>
+                <th align="left">Teknisi</th>
+                <th align="left">Laporan</th>
+                <th align="left">Plat</th>
+                <th align="left">Sparepart</th>
+                <th align="left">Qty</th>
+                <th align="left">Status</th>
+                <th align="left">Aksi</th>
               </tr>
-            ))}
-            {!usages.length && (
-              <tr>
-                <td colSpan="8" style={{ color: "#666" }}>
-                  Belum ada permintaan sparepart (pending).
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {pageUsagesData.map((u) => (
+                <tr key={u.id} style={{ borderBottom: "1px solid #eee" }}>
+                  <td>{fmtDate(u.created_at ?? u.date)}</td>
+                  <td>{uTech(u)}</td>
+                  <td>#{uReportId(u)}</td>
+                  <td>{uPlate(u)}</td>
+                  <td>
+                    <b>{uPartSku(u)}</b> — {uPartName(u)}
+                  </td>
+                  <td>{uQty(u)}</td>
+                  <td style={{ color: "#111" }}>{u.status ?? "pending"}</td>
+                  <td style={{ display: "flex", gap: 8 }}>
+                    <button style={btnPrimarySmall()} onClick={() => onApproveUsage(u)} type="button">
+                      Approve
+                    </button>
+                    <button style={btnDanger()} onClick={() => onRejectUsage(u)} type="button">
+                      Reject
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!usagesSorted.length && (
+                <tr>
+                  <td colSpan="8" style={{ color: "#666" }}>
+                    Belum ada permintaan sparepart (pending).
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </DataTableWrapper>
+
+        {usagesSorted.length > 0 && (
+          <Pager
+            page={pageUsages}
+            totalPages={totalPagesUsages}
+            totalRows={usagesSorted.length}
+            pageSize={PAGE_SIZE_USAGES}
+            onPrev={() => setPageUsages((p) => Math.max(1, p - 1))}
+            onNext={() => setPageUsages((p) => Math.min(totalPagesUsages, p + 1))}
+          />
+        )}
       </div>
 
+      {/* PARTS + MOVES */}
       <div style={{ ...card(), marginTop: 16 }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <h3 style={{ margin: 0, flex: 1 }}>Daftar Sparepart</h3>
@@ -449,100 +607,295 @@ export default function Inventory() {
           />
         </div>
 
-        <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse", marginTop: 10 }}>
-          <thead>
-            <tr style={{ background: "#f3f4f6" }}>
-              <th align="left">SKU</th>
-              <th align="left">Nama</th>
-              <th align="left">Stok</th>
-              <th align="left">Min</th>
-              <th align="left">Harga Beli</th>
-              <th align="left">Aksi</th>
-            </tr>
-          </thead>
-          <tbody>
-            {parts.map((p) => (
-              <tr key={p.id} style={{ borderBottom: "1px solid #eee" }}>
-                <td>
-                  <b>{p.sku}</b>
-                </td>
-                <td>{p.name}</td>
-                <td
-                  style={{
-                    color:
-                      Number(p.stock) <= Number(p.min_stock ?? p.minStock ?? 0) ? "#b00020" : "#111",
-                  }}
-                >
-                  {p.stock}
-                </td>
-                <td>{p.min_stock ?? p.minStock}</td>
-                <td>{Number(p.buy_price ?? p.buyPrice ?? 0).toLocaleString("id-ID")}</td>
-                <td style={{ display: "flex", gap: 8 }}>
-                  <button style={btnSecondary()} onClick={() => onEdit(p)}>
-                    Edit
-                  </button>
-                  <button style={btnDanger()} onClick={() => onDelete(p.id)}>
-                    Hapus
-                  </button>
-                </td>
+        <DataTableWrapper>
+          <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#f3f4f6" }}>
+                <th align="left">SKU</th>
+                <th align="left">Nama</th>
+                <th align="left">Stok</th>
+                <th align="left">Min</th>
+                <th align="left">Harga Beli</th>
+                <th align="left">Aksi</th>
               </tr>
-            ))}
-            {!parts.length && (
-              <tr>
-                <td colSpan="6" style={{ color: "#666" }}>
-                  Belum ada data.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {pagePartsData.map((p) => (
+                <tr key={p.id} style={{ borderBottom: "1px solid #eee" }}>
+                  <td><b>{p.sku}</b></td>
+                  <td>{p.name}</td>
+                  <td
+                    style={{
+                      color:
+                        Number(p.stock) <= Number(p.min_stock ?? p.minStock ?? 0)
+                          ? "#b00020"
+                          : "#111",
+                      fontWeight: 800,
+                    }}
+                  >
+                    {p.stock}
+                  </td>
+                  <td>{p.min_stock ?? p.minStock}</td>
+                  <td>{Number(p.buy_price ?? p.buyPrice ?? 0).toLocaleString("id-ID")}</td>
+                  <td style={{ display: "flex", gap: 8 }}>
+                    <button style={btnSecondary()} onClick={() => onEdit(p)} type="button">
+                      Edit
+                    </button>
+                    <button style={btnDanger()} onClick={() => onDelete(p.id)} type="button">
+                      Hapus
+                    </button>
+                  </td>
+                </tr>
+              ))}
 
-        <h4 style={{ marginTop: 16 }}>Log Mutasi Stok</h4>
+              {!partsSorted.length && (
+                <tr>
+                  <td colSpan="6" style={{ color: "#666" }}>
+                    Belum ada data.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </DataTableWrapper>
 
-        <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ background: "#f3f4f6" }}>
-              <th align="left">Tanggal</th>
-              <th align="left">Sparepart</th>
-              <th align="left">SKU</th>
-              <th align="left">Type</th>
-              <th align="left">Qty</th>
-              <th align="left">Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            {moves.slice(0, 10).map((m) => (
-              <tr key={m.id} style={{ borderBottom: "1px solid #eee" }}>
-                <td>{fmtDate(m.date ?? m.movement_date ?? m.created_at)}</td>
-                <td>{m.part?.name ?? "-"}</td>
-                <td>{m.part?.sku ?? "-"}</td>
-                <td>{m.type}</td>
-                <td>{m.qty}</td>
-                <td style={{ color: "#555" }}>
-                  {m.note}
-                  {m.ref ? <span style={{ color: "#888" }}> (ref: {m.ref})</span> : ""}
-                </td>
+        {partsSorted.length > 0 && (
+          <Pager
+            page={pageParts}
+            totalPages={totalPagesParts}
+            totalRows={partsSorted.length}
+            pageSize={PAGE_SIZE_PARTS}
+            onPrev={() => setPageParts((p) => Math.max(1, p - 1))}
+            onNext={() => setPageParts((p) => Math.min(totalPagesParts, p + 1))}
+          />
+        )}
+
+        <h4 style={{ marginTop: 16 }}>Log Mutasi Stok (Historical)</h4>
+
+        <DataTableWrapper>
+          <table width="100%" cellPadding="10" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#f3f4f6" }}>
+                <th align="left">Tanggal</th>
+                <th align="left">Sparepart</th>
+                <th align="left">SKU</th>
+                <th align="left">Type</th>
+                <th align="left">Qty</th>
+                <th align="left">Note</th>
               </tr>
-            ))}
-            {!moves.length && (
-              <tr>
-                <td colSpan="6" style={{ color: "#666" }}>
-                  Belum ada mutasi.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {pageMovesData.map((m) => (
+                <tr key={m.id} style={{ borderBottom: "1px solid #eee" }}>
+                  <td>{fmtDate(m.date ?? m.movement_date ?? m.created_at)}</td>
+                  <td>{m.part?.name ?? "-"}</td>
+                  <td>{m.part?.sku ?? "-"}</td>
+                  <td><b>{m.type}</b></td>
+                  <td>{m.qty}</td>
+                  <td style={{ color: "#555" }}>
+                    {m.note}
+                    {m.ref ? <span style={{ color: "#888" }}> (ref: {m.ref})</span> : ""}
+                  </td>
+                </tr>
+              ))}
+              {!movesSorted.length && (
+                <tr>
+                  <td colSpan="6" style={{ color: "#666" }}>
+                    Belum ada mutasi.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </DataTableWrapper>
+
+        {movesSorted.length > 0 && (
+          <Pager
+            page={pageMoves}
+            totalPages={totalPagesMoves}
+            totalRows={movesSorted.length}
+            pageSize={PAGE_SIZE_MOVES}
+            onPrev={() => setPageMoves((p) => Math.max(1, p - 1))}
+            onNext={() => setPageMoves((p) => Math.min(totalPagesMoves, p + 1))}
+          />
+        )}
       </div>
     </div>
   );
 }
 
+/* ==========================
+   COMPONENTS: DataTable + Pager + SearchableSelect
+========================== */
+
+function DataTableWrapper({ children }) {
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        border: `1px solid ${theme.primaryBorder}`,
+        borderRadius: 12,
+        overflow: "auto",
+        maxHeight: 420,
+        background: "#fff",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Pager({ page, totalPages, totalRows, pageSize, onPrev, onNext }) {
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(totalRows, page * pageSize);
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 10,
+        flexWrap: "wrap",
+      }}
+    >
+      <div style={{ color: theme.muted, fontWeight: 700, fontSize: 13 }}>
+        Menampilkan {from}-{to} dari {totalRows} (Hal {page}/{totalPages})
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          style={{
+            ...btnSecondary(),
+            opacity: page === 1 ? 0.6 : 1,
+            cursor: page === 1 ? "not-allowed" : "pointer",
+          }}
+          onClick={onPrev}
+          disabled={page === 1}
+          type="button"
+        >
+          Prev
+        </button>
+        <button
+          style={{
+            ...btnSecondary(),
+            opacity: page === totalPages ? 0.6 : 1,
+            cursor: page === totalPages ? "not-allowed" : "pointer",
+          }}
+          onClick={onNext}
+          disabled={page === totalPages}
+          type="button"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ✅ Searchable select tanpa library
+function SearchableSelect({ value, onChange, options, placeholder, disabled }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const selected = options.find((o) => String(o.value) === String(value));
+
+  const filtered = useMemo(() => {
+    const s = (q || "").trim().toLowerCase();
+    if (!s) return options;
+    return options.filter((o) => {
+      const label = `${o.label ?? ""} ${o.meta ?? ""}`.toLowerCase();
+      return label.includes(s);
+    });
+  }, [options, q]);
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      // close kalau klik di luar
+      if (!e.target.closest?.("[data-ss-root='1']")) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const pick = (val) => {
+    onChange(val);
+    setOpen(false);
+    setQ("");
+  };
+
+  return (
+    <div data-ss-root="1" style={{ position: "relative" }}>
+      <input
+        value={open ? q : selected ? `${selected.label} ${selected.meta ?? ""}` : ""}
+        onChange={(e) => {
+          setQ(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        placeholder={placeholder}
+        style={inp()}
+        disabled={disabled}
+        readOnly={!open} // saat belum open, input jadi display saja
+        onClick={() => setOpen(true)}
+      />
+
+      {/* hidden native input untuk required */}
+      <input type="hidden" value={value} required />
+
+      {open && !disabled && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: "calc(100% + 6px)",
+            background: "#fff",
+            border: `1px solid ${theme.primaryBorder}`,
+            borderRadius: 12,
+            boxShadow: "0 12px 30px rgba(15,23,42,0.12)",
+            zIndex: 50,
+            maxHeight: 260,
+            overflow: "auto",
+          }}
+        >
+          {filtered.length ? (
+            filtered.map((o) => (
+              <div
+                key={o.value}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(o.value);
+                }}
+                style={{
+                  padding: "10px 12px",
+                  cursor: "pointer",
+                  borderBottom: "1px solid #f1f5f9",
+                  fontWeight: 700,
+                  color: "#0f172a",
+                }}
+              >
+                {o.label}{" "}
+                {o.meta ? <span style={{ color: theme.muted, fontWeight: 600 }}>{o.meta}</span> : null}
+              </div>
+            ))
+          ) : (
+            <div style={{ padding: 12, color: theme.muted }}>Tidak ada hasil.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* =====================
+   STYLES (SAME THEME)
+===================== */
+
 const theme = {
-  primary: "#3B82F6",        
-  primarySoft: "#DBEAFE",    
-  primaryBorder: "#BFDBFE",  
-  primaryDark: "#1D4ED8",    
+  primary: "#3B82F6",
+  primarySoft: "#DBEAFE",
+  primaryBorder: "#BFDBFE",
+  primaryDark: "#1D4ED8",
   text: "#0F172A",
   muted: "#64748B",
   danger: "#DC2626",
