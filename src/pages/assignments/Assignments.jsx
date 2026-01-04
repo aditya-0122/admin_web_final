@@ -37,7 +37,7 @@ export default function Assignments() {
       setDrivers(Array.isArray(u) ? u : []);
       setVehicles(Array.isArray(v) ? v : []);
     } catch (err) {
-      setMsg(`❌ ${err.message}`);
+      setMsg(`❌ ${err?.message || "Gagal memuat data."}`);
     } finally {
       setLoading(false);
     }
@@ -99,7 +99,7 @@ export default function Assignments() {
       setMsg("✅ Assignment tersimpan.");
       await fetchAll();
     } catch (err) {
-      setMsg(`❌ ${err.message}`);
+      setMsg(`❌ ${err?.message || "Gagal menyimpan assignment."}`);
     }
   };
 
@@ -111,12 +111,16 @@ export default function Assignments() {
       setMsg("✅ Assignment dihapus.");
       await fetchAll();
     } catch (err) {
-      setMsg(`❌ ${err.message}`);
+      setMsg(`❌ ${err?.message || "Gagal menghapus assignment."}`);
     }
   };
 
   const resolveVehicle = (a) => a?.vehicle?.plate_number || "-";
   const resolveDriver = (a) => a?.driver?.username || "-";
+
+  // ✅ NORMALISASI: handle boolean / number / string ("0"/"1")
+  const isDriverActive = (d) =>
+    d?.is_active === true || d?.is_active === 1 || d?.is_active === "1";
 
   return (
     <div>
@@ -151,11 +155,14 @@ export default function Assignments() {
               disabled={loading}
             >
               <option value="">Pilih driver</option>
-              {drivers.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.username} {d.active ? "" : "(nonaktif)"}
-                </option>
-              ))}
+              {drivers.map((d) => {
+                const active = isDriverActive(d);
+                return (
+                  <option key={d.id} value={d.id}>
+                    {d.username} {active ? "" : "(nonaktif)"}
+                  </option>
+                );
+              })}
             </select>
 
             <button style={btnPrimary()} type="submit" disabled={loading}>
@@ -254,7 +261,8 @@ export default function Assignments() {
               }}
             >
               <div style={{ color: THEME.textMuted, fontWeight: 700, fontSize: 13 }}>
-                Halaman {page} / {totalPages} — Menampilkan {pageAssignments.length} dari {assignments.length} data
+                Halaman {page} / {totalPages} — Menampilkan {pageAssignments.length} dari{" "}
+                {assignments.length} data
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
