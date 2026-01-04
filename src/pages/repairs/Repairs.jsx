@@ -23,6 +23,10 @@ export default function Repairs() {
   const [qty, setQty] = useState(1);
   const [partsUsed, setPartsUsed] = useState([]);
 
+  // ✅ PAGINATION
+  const PAGE_SIZE = 5;
+  const [page, setPage] = useState(1);
+
   const loadAll = async () => {
     setLoading(true);
     setMsg("");
@@ -78,6 +82,26 @@ export default function Repairs() {
     return repairs.find((r) => Number(r.id) === Number(selectedId)) || null;
   }, [repairs, selectedId]);
 
+  // ✅ PAGINATION computed
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil((repairs?.length || 0) / PAGE_SIZE));
+  }, [repairs]);
+
+  useEffect(() => {
+    // kalau search berubah / data berubah, pastikan page valid
+    setPage((p) => Math.min(Math.max(1, p), totalPages));
+  }, [totalPages]);
+
+  useEffect(() => {
+    // reset ke page 1 kalau search berubah
+    setPage(1);
+  }, [search]);
+
+  const repairsPaged = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return (repairs || []).slice(start, start + PAGE_SIZE);
+  }, [repairs, page]);
+
   const open = (r) => {
     setSelectedId(Number(r.id));
     setMsg("");
@@ -124,7 +148,7 @@ export default function Repairs() {
     try {
       await finalizeRepair({
         id: selected.id,
-        technicianId, // ✅ ID angka (string di state tapi akan di-Number di service)
+        technicianId,
         action,
         cost,
         partsUsed,
@@ -166,49 +190,91 @@ export default function Repairs() {
           </div>
         )}
 
-        <table style={tableStyle()}>
-          <thead>
-            <tr>
-              <th style={thStyle()}>Tanggal</th>
-              <th style={thStyle()}>Plat</th>
-              <th style={thStyle()}>Status</th>
-              <th style={thStyle()}>Tindakan</th>
-              <th style={thStyle()}>Biaya</th>
-              <th style={thStyle()}>Aksi</th>
-            </tr>
-          </thead>
-
-          <tbody>
-            {repairs.map((r) => (
-              <tr key={r.id}>
-                <td style={tdStyle()}>{r.date}</td>
-                <td style={tdStyle()}>
-                  <b style={{ color: THEME.textStrong }}>{r.vehiclePlate}</b>
-                </td>
-                <td style={tdStyle()}>
-                  <span style={statusPill(r.finalized)}>{r.finalized ? "FINAL" : "DRAFT"}</span>
-                </td>
-                <td style={tdStyle()}>
-                  {r.action || <span style={{ color: THEME.textMuted }}>- belum diisi -</span>}
-                </td>
-                <td style={tdStyle()}>Rp {Number(r.cost || 0).toLocaleString("id-ID")}</td>
-                <td style={tdStyle()}>
-                  <button style={btn()} onClick={() => open(r)} disabled={loading}>
-                    {r.finalized ? "Lihat" : "Finalisasi"}
-                  </button>
-                </td>
-              </tr>
-            ))}
-
-            {!repairs.length && (
+        {/* table wrapper biar ga maksa layar kecil */}
+        <div style={{ overflowX: "auto" }}>
+          <table style={tableStyle()}>
+            <thead>
               <tr>
-                <td colSpan="6" style={{ ...tdStyle(), textAlign: "center", color: THEME.textMuted }}>
-                  Belum ada data repair.
-                </td>
+                <th style={thStyle()}>Tanggal</th>
+                <th style={thStyle()}>Plat</th>
+                <th style={thStyle()}>Status</th>
+                <th style={thStyle()}>Tindakan</th>
+                <th style={thStyle()}>Biaya</th>
+                <th style={thStyle()}>Aksi</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+
+            <tbody>
+              {repairsPaged.map((r) => (
+                <tr key={r.id}>
+                  <td style={tdStyle()}>{r.date}</td>
+                  <td style={tdStyle()}>
+                    <b style={{ color: THEME.textStrong }}>{r.vehiclePlate}</b>
+                  </td>
+                  <td style={tdStyle()}>
+                    <span style={statusPill(r.finalized)}>{r.finalized ? "FINAL" : "DRAFT"}</span>
+                  </td>
+                  <td style={tdStyle()}>
+                    {r.action || <span style={{ color: THEME.textMuted }}>- belum diisi -</span>}
+                  </td>
+                  <td style={tdStyle()}>Rp {Number(r.cost || 0).toLocaleString("id-ID")}</td>
+                  <td style={tdStyle()}>
+                    <button style={btn()} onClick={() => open(r)} disabled={loading}>
+                      {r.finalized ? "Lihat" : "Finalisasi"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+
+              {!repairs.length && (
+                <tr>
+                  <td colSpan="6" style={{ ...tdStyle(), textAlign: "center", color: THEME.textMuted }}>
+                    Belum ada data repair.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* ✅ Pagination controls (muncul kalau data > 5) */}
+        {repairs.length > PAGE_SIZE && (
+          <div
+            style={{
+              marginTop: 12,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+          >
+            <div style={{ color: THEME.textMuted, fontSize: 13, fontWeight: 700 }}>
+              Menampilkan {(page - 1) * PAGE_SIZE + 1}-
+              {Math.min(page * PAGE_SIZE, repairs.length)} dari {repairs.length} • Hal {page}/{totalPages}
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                style={btnPager(page === 1)}
+                disabled={page === 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                type="button"
+              >
+                Prev
+              </button>
+
+              <button
+                style={btnPager(page === totalPages)}
+                disabled={page === totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                type="button"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {selected && (
@@ -218,7 +284,6 @@ export default function Repairs() {
           </h3>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            {/* ✅ Pilih Teknisi pakai ID */}
             <select
               value={technicianId}
               onChange={(e) => setTechnicianId(e.target.value)}
@@ -266,7 +331,16 @@ export default function Repairs() {
                     </option>
                   ))}
                 </select>
-                <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} style={inp()} disabled={loading} />
+
+                <input
+                  type="number"
+                  value={qty}
+                  onChange={(e) => setQty(e.target.value)}
+                  style={inp()}
+                  min={1}
+                  disabled={loading}
+                />
+
                 <button type="button" onClick={addPart} style={btnPrimary()} disabled={loading}>
                   Tambah
                 </button>
@@ -347,6 +421,12 @@ const btn = () => ({
   cursor: "pointer",
 });
 
+const btnPager = (disabled) => ({
+  ...btn(),
+  opacity: disabled ? 0.6 : 1,
+  cursor: disabled ? "not-allowed" : "pointer",
+});
+
 const btnPrimary = () => ({
   padding: "10px 20px",
   borderRadius: "10px",
@@ -372,6 +452,7 @@ const tableStyle = () => ({
   width: "100%",
   borderCollapse: "collapse",
   border: `1px solid ${THEME.borderSoft}`,
+  minWidth: 760,
 });
 
 const thStyle = () => ({
